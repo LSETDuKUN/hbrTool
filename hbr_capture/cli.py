@@ -399,6 +399,7 @@ def cmd_widget(args) -> int:
         min_client=args.min_client,
         topmost=not args.no_topmost,
         preview=not args.no_preview,
+        enemy_count=args.enemy_count,
         ask_keep=not args.no_ask_keep,
         damage_trigger=not args.no_damage_trigger,
         damage_recheck=args.damage_recheck,
@@ -501,8 +502,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_target(p)
     p.add_argument("--outdir", default="frames")
-    p.add_argument("--width", type=int, default=280, help="挂件宽度（默认 280，窄长）")
-    p.add_argument("--height", type=int, default=960, help="挂件高度（默认 960）")
+    p.add_argument("--width", type=int, default=250, help="挂件宽度（默认 250）")
+    p.add_argument("--height", type=int, default=620, help="挂件高度（默认 620）")
+    p.add_argument("--enemy-count", type=int, default=1, help="怪物数量（平均伤害乘数）")
     p.add_argument("--fps", type=float, default=15.0)
     p.add_argument("--method", default="auto",
                    choices=["auto", "printwindow", "screendc", "bitblt"])
@@ -515,7 +517,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--settle", type=float, default=0.4)
     p.add_argument("--interval", type=float, default=None)
     p.add_argument("--no-topmost", action="store_true", help="不要总在最前")
-    p.add_argument("--no-preview", action="store_true", help="关掉实时预览图")
+    p.add_argument("--no-preview", action="store_true", default=True, help="关掉实时预览图（默认）")
+    p.add_argument("--preview", action="store_false", dest="no_preview", help="显示实时预览图")
     p.add_argument("--no-ask-keep", action="store_true",
                    help="停止时不要问「这次的帧留着还是删掉」")
     p.add_argument("--no-damage-trigger", action="store_true",

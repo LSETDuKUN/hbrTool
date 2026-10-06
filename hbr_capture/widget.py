@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import queue
+import json
 import threading
 import time
 import tkinter as tk
@@ -31,6 +32,7 @@ from . import win32
 from .capture import Frame, Grabber
 from .monitor import Monitor, MonitorConfig
 from .session import archive_run, discard_run, run_records
+from .damage_stats import DamageLedger
 
 # ---- 配色
 BG = "#191922"
@@ -76,10 +78,9 @@ class WidgetConfig:
     match: Optional[str] = None
     hwnd: Optional[int] = None
     outdir: Path = Path("frames")
-    #: 默认 280 而不是 300：这块屏上游戏右边只有约 320px 空隙，
-    #: 300 宽 + 边框几乎正好占满，留不出余量。
-    width: int = 280
-    height: int = 960
+    #: 留出窗口边框余量，适配窗口模式下游戏右侧的窄空隙。
+    width: int = 250
+    height: int = 620
     fps: float = 15.0
     method: str = "auto"
     hotkey_name: Optional[str] = "F9"
@@ -89,7 +90,8 @@ class WidgetConfig:
     interval: Optional[float] = None
     min_client: int = 200
     topmost: bool = True
-    preview: bool = True
+    preview: bool = False
+    enemy_count: int = 1
     ask_keep: bool = True      # 会话结束时问一句「这次的帧留着还是删掉」
     #: 认出伤害数字就立刻存。默认开 —— settle 会漏掉绝大部分伤害帧。
     damage_trigger: bool = True
@@ -130,7 +132,7 @@ def compute_placement(
         x = right + margin
         if x + phys_w + border > screen_w:
             if left - margin - phys_w - border >= 0:
-                x = left - margin - phys_w          # 右边放不下就放左边
+                x = left - margin - phys_w - border  # Include the outer frame on the left.
             else:
                 x = max(0, screen_w - phys_w - border)
         y = max(0, min(top, screen_h - phys_h - border))
@@ -150,6 +152,14 @@ def compute_placement(
     return x, y, overlaps, spare
 
 
+def compute_panel_width(game_rect, preferred, screen_w, minimum=220):
+    """Fit the client width into the larger side gap, reserving border/margin."""
+    if game_rect[0] <= -30000:
+        return preferred
+    room = max(game_rect[0], screen_w - game_rect[2]) - 40
+    return min(preferred, room) if room >= minimum else preferred
+
+
 class Widget:
     def __init__(self, config: WidgetConfig):
         self.cfg = config
@@ -167,6 +177,8 @@ class Widget:
         self.damage_readings = []
         self.reading_sum = 0
         self.total_damage = 0
+        self.ledger = DamageLedger()
+        self.ledger.set_enemies(config.enemy_count)
 
         self._build_ui()
 
@@ -183,145 +195,172 @@ class Widget:
     def _build_ui(self) -> None:
         cfg = self.cfg
         win32.set_dpi_aware()
-        root = tk.Tk()
-        self.root = root
-        root.title("HBR 抓帧")
+        root = self.root = tk.Tk()
+        root.title("HBR 伤害")
         root.configure(bg=BG)
-        # **位置稍后再定**（见 _build_ui 末尾的 _place_beside(None)）：
-        # 这里不写位置的话 Tk 会让系统随便挑一个，实测落在屏幕中左（127,70），
-        # 而不是用户期望的右侧 —— 而且游戏没找到时 _connect 不会摆位，
-        # 窗口就会一直待在系统挑的那个地方。
-        root.geometry(
-            f"{int(round(cfg.width * self._dpi_factor()))}"
-            f"x{int(round(cfg.height * self._dpi_factor()))}"
-        )
-        root.minsize(240, 420)
+        root.geometry(f"{cfg.width}x{cfg.height}")
+        root.minsize(220, 480)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
-        if cfg.topmost:
-            root.attributes("-topmost", True)
-
+        root.attributes("-topmost", cfg.topmost)
         small = tkfont.Font(family="Microsoft YaHei UI", size=8)
         tiny = tkfont.Font(family="Microsoft YaHei UI", size=7)
         bold = tkfont.Font(family="Microsoft YaHei UI", size=9, weight="bold")
         self._small, self._bold = small, bold
 
-        # ---- 目标窗口
         head = tk.Frame(root, bg=BG)
-        head.pack(fill="x", padx=8, pady=(8, 4))
-        self.lbl_target = tk.Label(
-            head, text="未连接", bg=BG, fg=FG, font=bold, anchor="w", justify="left"
-        )
-        self.lbl_target.pack(fill="x")
-        self.lbl_geom = tk.Label(
-            head, text="", bg=BG, fg=DIM, font=tiny, anchor="w", justify="left"
-        )
+        head.pack(fill="x", padx=12, pady=(12, 6))
+        self.lbl_target = tk.Label(head, text="等待游戏", bg=BG, fg=DIM,
+                                   font=small, anchor="w")
+        self.lbl_target.pack(side="left", fill="x", expand=True)
+        menu_button = tk.Menubutton(head, text="⋯", bg=PANEL, fg=FG, relief="flat",
+                                    font=bold, padx=8)
+        menu_button.pack(side="right")
+        menu = tk.Menu(menu_button, tearoff=False, bg=PANEL, fg=FG,
+                       activebackground=ACCENT, activeforeground="white")
+        menu_button.configure(menu=menu)
+        menu.add_command(label="抓取当前帧  F9", command=self.snap)
+        menu.add_command(label="窗口归位", command=self.reposition)
+        menu.add_command(label="打开帧目录", command=self.open_dir)
+        menu.add_separator()
+        self._preview_var = tk.BooleanVar(value=cfg.preview)
+        menu.add_checkbutton(label="画面预览", variable=self._preview_var,
+                             command=self._toggle_preview)
+        self._topmost_var = tk.BooleanVar(value=cfg.topmost)
+        menu.add_checkbutton(label="保持置顶", variable=self._topmost_var,
+                             command=self._toggle_topmost)
+        menu.add_command(label="日志与诊断", command=self._toggle_details)
+
+        card = tk.Frame(root, bg=PANEL, padx=12, pady=12)
+        card.pack(fill="x", padx=12, pady=6)
+        tk.Label(card, text="累计伤害", bg=PANEL, fg=DIM, font=small,
+                 anchor="w").pack(fill="x")
+        self._total_font = tkfont.Font(family="Segoe UI", size=18, weight="bold")
+        self.lbl_damage_sum = tk.Label(card, text="0", bg=PANEL, fg=ACCENT,
+            font=self._total_font, anchor="w")
+        self.lbl_damage_sum.pack(fill="x")
+        self.lbl_total_damage = tk.Label(card, text="已确认 0 笔 · 待确认 0 笔",
+                                         bg=PANEL, fg=DIM, font=tiny, anchor="w")
+        self.lbl_total_damage.pack(fill="x", pady=(3, 0))
+
+        targets = tk.Frame(root, bg=BG)
+        targets.pack(fill="x", padx=12, pady=(6, 2))
+        tk.Label(targets, text="怪物数量", bg=BG, fg=FG, font=small).pack(side="left")
+        self._enemy_var = tk.StringVar(value=str(self.ledger.enemies))
+        spin = tk.Spinbox(targets, from_=1, to=99, width=3, textvariable=self._enemy_var,
+            command=self._change_enemies, bg=PANEL, fg=FG, buttonbackground=PANEL,
+            insertbackground=FG, relief="flat", font=small)
+        spin.pack(side="right")
+        spin.bind("<Return>", self._change_enemies)
+        spin.bind("<FocusOut>", self._change_enemies)
+        self.lbl_enemy_hint = tk.Label(root, text="平均 × 怪数；修改后重算本轮",
+            bg=BG, fg=DIM, font=tiny, anchor="w")
+        self.lbl_enemy_hint.pack(fill="x", padx=12, pady=(0, 8))
+
+        self.btn_toggle = tk.Button(root, text="开始", command=self.toggle, bg=ACCENT,
+            fg="white", activebackground="#ff7ba1", relief="flat", font=bold, pady=5)
+        self.btn_toggle.pack(fill="x", padx=12, pady=(0, 8))
+        self.lbl_preview = tk.Label(root, bg=PANEL, bd=0)
+        self._content = tk.Frame(root, bg=BG)
+        self._content.pack(fill="both", expand=True, padx=12)
+        tk.Label(self._content, text="伤害明细", bg=BG, fg=FG, font=bold,
+                 anchor="w").pack(fill="x", pady=(0, 5))
+        tk.Label(self._content, text="未知 / 残缺不入账", bg=BG, fg=DIM,
+                 font=tiny, anchor="w").pack(fill="x", pady=(0, 5))
+        damage_wrap = tk.Frame(self._content, bg=PANEL)
+        damage_wrap.pack(fill="both", expand=True)
+        self.txt_damage = tk.Text(damage_wrap, height=4, bg=PANEL, fg=FG,
+            font=("Microsoft YaHei UI", 8), wrap="word", state="disabled",
+            relief="flat", highlightthickness=0, padx=6, pady=6)
+        scroll = tk.Scrollbar(damage_wrap, command=self.txt_damage.yview)
+        self.txt_damage.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        self.txt_damage.pack(side="left", fill="both", expand=True)
+        self.txt_damage.tag_config("pending", foreground=WARN)
+        self.txt_damage.tag_config("confirmed", foreground=FG)
+
+        self._details = tk.Frame(root, bg=BG)
+        self._details_visible = False
+        self.lbl_geom = tk.Label(self._details, text="", bg=BG, fg=DIM, font=tiny)
         self.lbl_geom.pack(fill="x")
-
-        # ---- 预览
-        self.lbl_preview = tk.Label(root, bg=PANEL, bd=0, highlightthickness=1,
-                                    highlightbackground="#33334a")
-        self.lbl_preview.pack(fill="x", padx=8, pady=4)
-
-        # ---- 状态
-        stats = tk.Frame(root, bg=PANEL)
-        stats.pack(fill="x", padx=8, pady=4)
+        stats = tk.Frame(self._details, bg=PANEL)
+        stats.pack(fill="x", pady=3)
         self._stat_labels = {}
-        rows = [
-            ("method", "抓图方式"), ("state", "画面"),
-            ("saved", "已存帧"), ("damage", "认出伤害"),
-            ("skipped", "跳过重复"), ("grabbed", "抓帧次数"),
-            ("fps", "实际帧率"), ("diff", "场景变化峰值"),
-            ("uptime", "已运行"),
-        ]
+        rows = [("method", "抓图方式"), ("state", "画面"),
+                ("saved", "已存帧"), ("damage", "伤害事件"),
+                ("skipped", "跳过重复"), ("grabbed", "抓帧次数"),
+                ("fps", "实际帧率"), ("diff", "变化峰值"), ("uptime", "已运行")]
         for i, (key, label) in enumerate(rows):
-            tk.Label(stats, text=label, bg=PANEL, fg=DIM, font=small,
-                     anchor="w").grid(row=i, column=0, sticky="w", padx=(6, 4), pady=1)
-            value = tk.Label(stats, text="-", bg=PANEL, fg=FG, font=small, anchor="e")
-            value.grid(row=i, column=1, sticky="e", padx=(0, 6), pady=1)
+            row, col = divmod(i, 2)
+            tk.Label(stats, text=label, bg=PANEL, fg=DIM, font=tiny).grid(
+                row=row, column=col * 2, sticky="w", padx=3)
+            value = tk.Label(stats, text="-", bg=PANEL, fg=FG, font=tiny)
+            value.grid(row=row, column=col * 2 + 1, sticky="e", padx=3)
             self._stat_labels[key] = value
         stats.columnconfigure(1, weight=1)
+        stats.columnconfigure(3, weight=1)
+        self.txt_log = tk.Text(self._details, bg=PANEL, fg=DIM, font=("Consolas", 7),
+            relief="flat", highlightthickness=0, wrap="word", height=4, state="disabled")
+        self.txt_log.pack(fill="x", pady=3)
+        for tag, color in (("warn", WARN), ("err", ERR), ("ok", OK)):
+            self.txt_log.tag_config(tag, foreground=color)
 
-        # ---- 遮挡告警
-        self.lbl_warn = tk.Label(
-            root, text="", bg=PANEL, fg=WARN, font=small,
-            wraplength=cfg.width - 28, justify="left", anchor="w",
-        )
-        self.lbl_warn.pack(fill="x", padx=8, pady=(0, 4))
-
-        # ---- 按钮
-        buttons = tk.Frame(root, bg=BG)
-        buttons.pack(fill="x", padx=8, pady=4)
-        self.btn_toggle = tk.Button(
-            buttons, text="开始", command=self.toggle, bg=ACCENT, fg="white",
-            activebackground="#ff7ba1", relief="flat", font=bold,
-        )
-        self.btn_toggle.pack(side="left", fill="x", expand=True, padx=(0, 4))
-        self.btn_snap = tk.Button(
-            buttons, text="抓一帧", command=self.snap, bg=PANEL, fg=FG,
-            activebackground="#2e2e40", relief="flat", font=small,
-        )
-        self.btn_snap.pack(side="left", fill="x", expand=True, padx=4)
-        self.btn_home = tk.Button(
-            buttons, text="归位", command=self.reposition, bg=PANEL, fg=FG,
-            activebackground="#2e2e40", relief="flat", font=small,
-        )
-        self.btn_home.pack(side="left", fill="x", expand=True, padx=4)
-        self.btn_open = tk.Button(
-            buttons, text="打开目录", command=self.open_dir, bg=PANEL, fg=FG,
-            activebackground="#2e2e40", relief="flat", font=small,
-        )
-        self.btn_open.pack(side="left", fill="x", expand=True, padx=(4, 0))
-
-        # ---- 实时伤害：每个定稿事件只入账一次，停止后保留。
-        self.lbl_damage_sum = tk.Label(root, text="读数累计: 0", bg=PANEL, fg=ACCENT,
-            font=bold, anchor="w")
-        self.lbl_damage_sum.pack(fill="x", padx=8)
-        self.lbl_total_damage = tk.Label(root, text="确认总伤害: 0", bg=PANEL, fg=FG,
-            font=small, anchor="w")
-        self.lbl_total_damage.pack(fill="x", padx=8)
-        tk.Label(root, text="读数累计含平均；确认总伤害仅含合计", bg=BG, fg=DIM,
-            font=tiny).pack(fill="x", padx=8)
-        damage_wrap = tk.Frame(root, bg=BG)
-        damage_wrap.pack(fill="x", padx=8, pady=4)
-        self.txt_damage = tk.Text(damage_wrap, height=5, bg=PANEL, fg=FG,
-            font=("Consolas", 8), wrap="word", state="disabled")
-        damage_scroll = tk.Scrollbar(damage_wrap, command=self.txt_damage.yview)
-        self.txt_damage.configure(yscrollcommand=damage_scroll.set)
-        damage_scroll.pack(side="right", fill="y")
-        self.txt_damage.pack(side="left", fill="both", expand=True)
-
-        # ---- 日志
-        log_wrap = tk.Frame(root, bg=BG)
-        log_wrap.pack(fill="both", expand=True, padx=8, pady=(4, 2))
-        self.txt_log = tk.Text(
-            log_wrap, bg=PANEL, fg=DIM, font=("Consolas", 8), bd=0,
-            highlightthickness=0, wrap="word", height=6, state="disabled",
-        )
-        self.txt_log.pack(fill="both", expand=True)
-        self.txt_log.tag_config("warn", foreground=WARN)
-        self.txt_log.tag_config("err", foreground=ERR)
-        self.txt_log.tag_config("ok", foreground=OK)
-
-        # ---- 底部提示
-        hint = (
-            f"[{cfg.hotkey_name}] 抓当前帧"
-            if cfg.hotkey_name else ""
-        )
-        if cfg.stop_hotkey_name:
-            hint += f"　[{cfg.stop_hotkey_name}] 停止"
-        tk.Label(root, text=hint, bg=BG, fg=DIM, font=small).pack(pady=(0, 8))
-
-        self._log("挂件已就绪。点「开始」连接游戏窗口。")
+        self.btn_details = tk.Button(root, text="▸ 日志与诊断", bg=BG, fg=DIM,
+            relief="flat", font=tiny, command=self._toggle_details, anchor="w")
+        self.btn_details.pack(fill="x", padx=12, pady=(6, 2))
+        self.lbl_warn = tk.Label(root, text="", bg=BG, fg=WARN, font=tiny,
+                                wraplength=cfg.width - 24, justify="left", anchor="w")
+        self.lbl_warn.pack(fill="x", padx=12, pady=(0, 8))
+        self._toggle_preview()
+        self._log("挂件已就绪；未知和残缺读数不计入累计伤害。")
         self.root.after(80, self._pump)
         self.root.after(2000, self._watchdog)
-
-        # 立刻摆到位 —— 游戏还没开也要贴在右侧。
-        # 不主动摆的话窗口会停在系统随便挑的位置（实测屏幕中左），
-        # 而游戏没找到时 _connect 一直在重试、不会摆位，就一直待在那儿。
         self._place_beside(None)
-
-        # 窗口是自动识别的，不需要用户给任何参数，直接连
         self.root.after(250, self.start)
+
+    def _toggle_details(self):
+        self._details_visible = not self._details_visible
+        if self._details_visible:
+            self._details.pack(fill="x", padx=12, before=self.btn_details)
+        else:
+            self._details.pack_forget()
+        self.btn_details.config(text="▾ 收起日志与诊断" if self._details_visible else "▸ 日志与诊断")
+        self._resize_panel()
+
+    def _desired_height(self):
+        height = self.cfg.height + (250 if self._details_visible else 0) + (140 if self.cfg.preview else 0)
+        return min(height, self.root.winfo_screenheight() - 80)
+
+    def _resize_panel(self):
+        self.root.update_idletasks()
+        x, y, _, _ = self._physical_bounds()
+        width, height = self.root.winfo_width(), self._desired_height()
+        x = max(0, min(x, self.root.winfo_screenwidth() - width - 32))
+        y = max(0, min(y, self.root.winfo_screenheight() - height - 60))
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
+
+    def _toggle_preview(self):
+        self.cfg.preview = self._preview_var.get()
+        if self.cfg.preview:
+            self.lbl_preview.pack(fill="x", padx=12, pady=(0, 6), before=self._content)
+        else:
+            self.lbl_preview.pack_forget()
+        if hasattr(self, "lbl_warn"):
+            self._resize_panel()
+
+    def _toggle_topmost(self):
+        self.cfg.topmost = self._topmost_var.get()
+        self.root.attributes("-topmost", self.cfg.topmost)
+
+    def _change_enemies(self, event=None):
+        try:
+            self.ledger.set_enemies(self._enemy_var.get())
+        except ValueError as exc:
+            self.lbl_enemy_hint.config(text=str(exc), fg=ERR)
+            return
+        self.cfg.enemy_count = self.ledger.enemies
+        self.lbl_enemy_hint.config(text="平均 × 怪数；修改后重算本轮", fg=DIM)
+        self._render_damage()
+        self._save_totals({"type": "enemy_count", "enemy_count": self.ledger.enemies})
 
     # ------------------------------------------------------------ 线程回调
 
@@ -335,23 +374,58 @@ class Widget:
         self.queue.put(("damage", event))
 
     def _display_damage(self, event: dict) -> None:
+        self.ledger.add(event)
+        self._render_damage()
+        self._save_totals(dict(event, type="damage"))
+
+    def _render_damage(self):
+        self.damage_readings = self.ledger.readings
+        self.reading_sum = self.total_damage = self.ledger.total
         self.txt_damage.config(state="normal")
-        for reading in event["readings"]:
-            self.damage_readings.append(reading)
-            value = reading["value"]
-            label = reading["label"]
-            resolved = not reading.get("unresolved", 0)
-            if resolved:
-                self.reading_sum += value
-                if label == "合计":
-                    self.total_damage += value
-            flag = "（残缺，不累计）" if not resolved else ""
-            self.txt_damage.insert("end", f"{len(self.damage_readings):03d} [{label}] "
-                f"{reading.get('text', value)} {flag}\n")
+        self.txt_damage.delete("1.0", "end")
+        for number, reading in enumerate(self.damage_readings, 1):
+            value, label = reading["value"], reading["label"]
+            amount = self.ledger.amount(reading)
+            if amount is None:
+                reason = "残缺" if reading.get("unresolved", 0) else "未知"
+                line = f"{number:02d}  [{reason}] {reading.get('text', value)}\n     未计入\n"
+                tag = "pending"
+            elif label == "平均":
+                line = f"{number:02d}  {value:,} × {self.ledger.enemies}\n     {amount:,}\n"
+                tag = "confirmed"
+            else:
+                line = f"{number:02d}  合计  {amount:,}\n"
+                tag = "confirmed"
+            self.txt_damage.insert("end", line, tag)
         self.txt_damage.see("end")
         self.txt_damage.config(state="disabled")
-        self.lbl_damage_sum.config(text=f"读数累计: {self.reading_sum:,}")
-        self.lbl_total_damage.config(text=f"确认总伤害: {self.total_damage:,}")
+        total_text = f"{self.total_damage:,}"
+        font = getattr(self, "_total_font", None)
+        if font is not None:
+            available = self.lbl_damage_sum.winfo_width()
+            if available <= 1:
+                available = self.cfg.width - 48
+            for size in range(18, 9, -1):
+                font.configure(size=size)
+                if font.measure(total_text) <= available:
+                    break
+        self.lbl_damage_sum.config(text=total_text)
+        pending = self.ledger.pending
+        self.lbl_total_damage.config(text=f"已确认 {len(self.damage_readings) - pending} 笔 · 待确认 {pending} 笔")
+
+    def _save_totals(self, event):
+        monitor = getattr(self, "monitor", None)
+        if monitor is None:
+            return
+        record = dict(event, enemy_count=self.ledger.enemies,
+                      total=self.ledger.total, time=time.time())
+        try:
+            path = Path(self.cfg.outdir) / f"session-{monitor.run_id}-totals.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            self._log(f"统计记录写入失败: {exc}", "err")
 
     def _should_stop_thread(self) -> bool:
         return self._stop.is_set()
@@ -384,6 +458,8 @@ class Widget:
         self.root.after(80, self._pump)
 
     def _update_stats(self, stats: dict) -> None:
+        self.lbl_target.config(text="HBR · 画面异常" if stats.get("broken") else "HBR · 识别中",
+                               fg=WARN if stats.get("broken") else OK)
         s = self._stat_labels
         s["method"].config(text=str(stats.get("method", "-")))
         broken = stats.get("broken")
@@ -416,6 +492,8 @@ class Widget:
         self.lbl_preview.config(image=photo)
 
     def _log(self, line: str, tag: str = "") -> None:
+        if tag in ("err", "warn") or "[出错]" in line:
+            self.lbl_warn.config(text=line[:140], fg=ERR if tag == "err" or "[出错]" in line else WARN)
         text = self.txt_log
         text.config(state="normal")
         text.insert("end", line + "\n", tag or ())
@@ -439,13 +517,19 @@ class Widget:
             return
         if self._want_running:
             return
+        try:
+            self.ledger.set_enemies(self._enemy_var.get())
+        except ValueError as exc:
+            self.lbl_enemy_hint.config(text=str(exc), fg=ERR)
+            return
         self.damage_readings.clear()
+        self.ledger = DamageLedger(enemies=self.ledger.enemies)
         self.reading_sum = self.total_damage = 0
         self.txt_damage.config(state="normal")
         self.txt_damage.delete("1.0", "end")
         self.txt_damage.config(state="disabled")
-        self.lbl_damage_sum.config(text="读数累计: 0")
-        self.lbl_total_damage.config(text="确认总伤害: 0")
+        self.lbl_damage_sum.config(text="0")
+        self.lbl_total_damage.config(text="已确认 0 笔 · 待确认 0 笔")
         self._want_running = True
         self._retries = 0
         self.btn_toggle.config(text="取消", bg="#3a3a4e")
@@ -483,7 +567,7 @@ class Widget:
 
         # 顶部标题要更新 —— 之前连着却一直显示"未连接"
         proc = Path(info.process).name if info.process else "?"
-        self.lbl_target.config(text=info.title or proc, fg=FG)
+        self.lbl_target.config(text="HBR · 连接中", fg=FG)
         w, h = info.client_size
         self.lbl_geom.config(text=f"{proc}  {w}x{h}  0x{info.hwnd:X}")
 
@@ -556,6 +640,7 @@ class Widget:
             return
 
         self.btn_toggle.config(text="开始", bg=ACCENT)
+        self.lbl_target.config(text="HBR · 已停止", fg=DIM)
         self._log("已停止。")
         self._maybe_ask_keep()
 
@@ -670,7 +755,7 @@ class Widget:
         factor = self._dpi_factor()
 
         phys_w = self.cfg.width
-        phys_h = self.cfg.height
+        phys_h = self._desired_height()
         screen_w = root.winfo_screenwidth()
         screen_h = root.winfo_screenheight()
 
@@ -682,6 +767,8 @@ class Widget:
         # 窗口边框不在 Tk 的 geometry 里。不留出这点余量的话，
         # 窗口右边缘会伸到屏幕外面去（实测超出 12px）。
         border = 32
+        phys_w = compute_panel_width(game_rect, phys_w, screen_w)
+        self.lbl_warn.config(wraplength=phys_w - 24)
 
         phys_x, phys_y, overlaps, spare = compute_placement(
             game_rect, phys_w, phys_h, screen_w, screen_h, margin, border
@@ -721,7 +808,7 @@ class Widget:
             )
         else:
             self.lbl_warn.config(
-                text=f"✓ 贴在游戏右侧，不遮挡（右边还剩 {max(spare, 0)}px）",
+                text="",
                 fg=OK,
             )
 

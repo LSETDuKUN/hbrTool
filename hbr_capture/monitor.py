@@ -121,6 +121,8 @@ class Monitor:
         self._replacement_key = None
         self._replacement_since = 0.0
         self._confirmed_readings = []
+        self._event_serial = 0
+        self._label_retry_at = 0.0
 
         self.damage_hits = 0
         self.flash_skipped = 0
@@ -333,6 +335,7 @@ class Monitor:
             }
             if trigger == "damage":
                 record["damage"] = self._confirmed_readings
+                record["damage_event_id"] = self._event_serial
             with (self.cfg.outdir / "index.jsonl").open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -381,6 +384,7 @@ class Monitor:
         )
 
     def _begin_event(self, key, digits: int, frame: Frame, diff: float, now: float) -> None:
+        self._event_serial += 1
         self._event_key = key
         self._event_digits = digits
         self._event_frame = frame
@@ -424,7 +428,32 @@ class Monitor:
         if self._save(frame, "damage", self._event_diff, dedup=False) is not False:
             if self.cfg.on_damage is not None:
                 self.cfg.on_damage({"run": self.run_id, "file": f"{self.seq:06d}.png",
-                    "readings": readings})
+                    "event_id": self._event_serial, "readings": readings})
+        self._label_retry_at = now + 0.5
+
+    def _retry_unknown_label(self, frame, key, now):
+        if (not self._event_flushed or key != self._event_key
+                or now < self._label_retry_at or not self._confirmed_readings
+                or all(r["label"] != "未知" and not r.get("unresolved", 0)
+                       for r in self._confirmed_readings)):
+            return
+        self._label_retry_at = now + 0.5
+        try:
+            found = self._read_damage_frame(frame, recognize_labels=True)
+        except Exception as exc:
+            self._say(f"遮挡后标签复核暂不可用: {exc}")
+            return
+        if tuple(r.value for r in found) != key:
+            return
+        if not any(r.label in ("合计", "平均") and not r.unresolved for r in found):
+            return
+        self._confirmed_readings = [dict(value=r.value, text=r.text, label=r.label,
+            confidence=r.confidence, label_score=r.label_score,
+            unresolved=r.unresolved) for r in found]
+        self._say("      >> 遮挡后标签已确认，更新原伤害记录")
+        if self.cfg.on_damage is not None:
+            self.cfg.on_damage({"run": self.run_id, "event_id": self._event_serial,
+                "update": True, "readings": self._confirmed_readings})
 
     def _read_damage_frame(self, frame, recognize_labels=False):
         import numpy as np
@@ -475,6 +504,7 @@ class Monitor:
         digits = sum(len(str(value)) for value in key)
         self._current_damage_key = key
         self.observe_damage(key, digits, frame, diff, now)
+        self._retry_unknown_label(frame, key, now)
 
     def observe_damage(self, key, digits: int, frame: Frame, diff: float, now: float) -> None:
         """看到一个伤害读数：推进事件状态机，必要时定稿存盘。

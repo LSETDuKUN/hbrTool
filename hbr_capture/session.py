@@ -110,6 +110,7 @@ def _run_sidecars(outdir, run_id: str) -> List[Path]:
     candidates = [
         outdir / f"session-{run_id}.log",
         outdir / f"session-{run_id}.json",
+        outdir / f"session-{run_id}-totals.jsonl",
     ]
     return [p for p in candidates if p.exists()]
 

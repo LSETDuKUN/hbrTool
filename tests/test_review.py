@@ -12,6 +12,16 @@ from tools import read_frames
 
 
 class ReviewRegressionTests(unittest.TestCase):
+    def test_narrow_windowed_game_gap_fits_outer_widget(self):
+        from hbr_capture.widget import compute_panel_width, compute_placement
+        rect = (265, 100, 2310, 1300)
+        width = compute_panel_width(rect, 250, 2560)
+        self.assertEqual(width, 225)
+        x, y, overlaps, _ = compute_placement(rect, width, 620, 2560, 1600)
+        self.assertFalse(overlaps)
+        self.assertLessEqual(x + width + 32, rect[0] - 8)
+        self.assertGreaterEqual(x, 0)
+
     def test_real_frame_event_is_labeled_once_and_saved_with_metadata(self):
         from PIL import Image
         from hbr_capture.capture import Frame
@@ -82,6 +92,8 @@ class ReviewRegressionTests(unittest.TestCase):
         from unittest.mock import MagicMock
         widget = Widget.__new__(Widget)
         widget.damage_readings = []
+        from hbr_capture.damage_stats import DamageLedger
+        widget.ledger = DamageLedger(enemies=2)
         widget.reading_sum = widget.total_damage = 0
         widget.txt_damage = MagicMock()
         widget.lbl_damage_sum = MagicMock()
@@ -92,9 +104,53 @@ class ReviewRegressionTests(unittest.TestCase):
             {"value": 300, "label": "未知"},
             {"value": 40, "label": "合计", "unresolved": 1}]})
         self.assertEqual(len(widget.damage_readings), 4)
-        self.assertEqual(widget.reading_sum, 600)
-        self.assertEqual(widget.total_damage, 100)
-        widget.lbl_damage_sum.config.assert_called_with(text="读数累计: 600")
+        self.assertEqual(widget.reading_sum, 500)
+        self.assertEqual(widget.total_damage, 500)
+        widget.lbl_damage_sum.config.assert_called_with(text="500")
+
+    def test_unknown_revision_is_counted_once(self):
+        from hbr_capture.damage_stats import DamageLedger
+        ledger = DamageLedger(enemies=2)
+        ledger.add({"run": "test", "event_id": 1, "readings": [
+            {"value": 100, "label": "未知"}]})
+        self.assertEqual(ledger.total, 0)
+        self.assertEqual(ledger.pending, 1)
+        known = {"run": "test", "event_id": 1, "readings": [
+            {"value": 100, "label": "平均"}]}
+        ledger.add(known)
+        ledger.add(known)
+        self.assertEqual(ledger.total, 200)
+        self.assertEqual(len(ledger.readings), 1)
+        ledger.add({"run": "test", "event_id": 2, "readings": [
+            {"value": 100, "label": "合计"}]})
+        self.assertEqual(ledger.total, 300)
+
+    def test_monster_count_recalculates_average_only(self):
+        from hbr_capture.damage_stats import DamageLedger
+        ledger = DamageLedger()
+        ledger.add({"readings": [{"value": 100, "label": "平均"},
+            {"value": 50, "label": "合计"}, {"value": 200, "label": "未知"}]})
+        ledger.set_enemies("2")
+        self.assertEqual(ledger.total, 250)
+        ledger.set_enemies("3")
+        self.assertEqual(ledger.total, 350)
+        for value in ("", "0", "-1", "2.5", "abc", "100"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                ledger.set_enemies(value)
+        self.assertEqual(ledger.enemies, 3)
+
+    def test_unknown_label_recovery_reuses_event_identity(self):
+        monitor, events = self.event_monitor()
+        monitor.observe_damage((100,), 3, "frame", 0, 0)
+        monitor.observe_damage((100,), 3, "frame", 0, .31)
+        known = SimpleNamespace(value=100, text="100", label="合计",
+            confidence=.9, label_score=.9, unresolved=0)
+        monitor._read_damage_frame = lambda *args, **kwargs: [known]
+        monitor._retry_unknown_label("clear_frame", (100,), 1)
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0]["event_id"], events[1]["event_id"])
+        self.assertEqual(events[1]["readings"][0]["label"], "合计")
+        self.assertEqual(monitor.damage_hits, 1)
 
 
     def test_font_dpi_does_not_rescale_window_coordinates(self):
@@ -156,6 +212,18 @@ class ReviewRegressionTests(unittest.TestCase):
                 session.archive_run(root, "runA", root / "results")
             self.assertEqual((dest / "frame.png").read_bytes(), b"old")
             self.assertEqual((root / "frame.png").read_bytes(), b"new")
+
+    def test_archive_includes_damage_count_and_revision_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "frame.png").write_bytes(b"frame")
+            (root / "index.jsonl").write_text(json.dumps({
+                "run": "runA", "file": "frame.png"}), encoding="utf-8")
+            history = root / "session-runA-totals.jsonl"
+            history.write_text('{"enemy_count": 2, "total": 100}\n', encoding="utf-8")
+            dest = session.archive_run(root, "runA", root / "results")
+            self.assertTrue((dest / history.name).exists())
+            self.assertFalse(history.exists())
 
     def test_non_object_index_records_are_preserved_but_not_used(self):
         with tempfile.TemporaryDirectory() as tmp:
