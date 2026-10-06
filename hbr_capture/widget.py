@@ -106,7 +106,7 @@ def compute_placement(
     screen_w: int,
     screen_h: int,
     margin: int = 8,
-    border: int = 16,
+    border: int = 32,
 ):
     """算出挂件该摆在哪个物理像素位置。返回 (x, y, overlaps, spare_right)。
 
@@ -170,28 +170,20 @@ class Widget:
     # ------------------------------------------------------------ UI
 
     def _dpi_factor(self) -> float:
-        """Tk 的 geometry 单位 -> 物理像素的换算系数。
+        """DPI-aware Tk geometry already uses physical pixels.
 
-        进程设了 DPI 感知（set_dpi_aware）之后，Tk 的 geometry 单位不再是物理像素：
-        实测 150% 缩放的机器上请求 300x960 只得到 200x640，正好差 1.5 倍。
-        所有 geometry 调用都要乘这个系数。
+        winfo_fpixels('1i') describes font scaling, not geometry scaling.
+        Applying it again moves a 150% DPI window beyond the screen edge.
         """
-        try:
-            factor = self.root.winfo_fpixels("1i") / 96.0
-        except Exception:
-            return 1.0
-        return factor if factor > 0 else 1.0
+        return 1.0
 
     def _build_ui(self) -> None:
         cfg = self.cfg
+        win32.set_dpi_aware()
         root = tk.Tk()
         self.root = root
         root.title("HBR 抓帧")
         root.configure(bg=BG)
-        # 初始尺寸也要按 DPI 换算 —— 和 _place_beside 是同一个坑：
-        # 设了 DPI 感知之后 Tk 的 geometry 单位不是物理像素。
-        # 不换算的话窗口会是应有尺寸的 1/1.5（实测 280x960 变成 186x640）。
-        #
         # **位置稍后再定**（见 _build_ui 末尾的 _place_beside(None)）：
         # 这里不写位置的话 Tk 会让系统随便挑一个，实测落在屏幕中左（127,70），
         # 而不是用户期望的右侧 —— 而且游戏没找到时 _connect 不会摆位，
@@ -619,9 +611,7 @@ class Widget:
         root = self.root
         root.update_idletasks()
 
-        # ---- DPI 陷阱 ----
-        # 见 _dpi_factor()：Tk 的 geometry 单位不是物理像素。
-        # 位置和尺寸都要换算，不修的话挂件在任何非 100% 缩放的显示器上都会缩水。
+        # DPI awareness is set before creating Tk; geometry is in physical pixels.
         factor = self._dpi_factor()
 
         phys_w = self.cfg.width
@@ -636,7 +626,7 @@ class Widget:
         margin = 8
         # 窗口边框不在 Tk 的 geometry 里。不留出这点余量的话，
         # 窗口右边缘会伸到屏幕外面去（实测超出 12px）。
-        border = 16
+        border = 32
 
         phys_x, phys_y, overlaps, spare = compute_placement(
             game_rect, phys_w, phys_h, screen_w, screen_h, margin, border
@@ -683,17 +673,12 @@ class Widget:
     # ------------------------------------------------------------ 自我看护
 
     def _physical_bounds(self):
-        """挂件当前在**物理像素**下的 (x, y, w, h)。
-
-        Tk 的 winfo_* 给的是 Tk 单位，要除以 DPI 系数才是物理像素。
-        """
-        factor = self._dpi_factor() or 1.0
-        return (
-            int(round(self.root.winfo_x() / factor)),
-            int(round(self.root.winfo_y() / factor)),
-            int(round(self.root.winfo_width() / factor)),
-            int(round(self.root.winfo_height() / factor)),
-        )
+        """Read the real outer window rectangle, including its border."""
+        rect = win32.wintypes.RECT()
+        hwnd = int(self.root.frame(), 0)
+        if not win32.user32.GetWindowRect(hwnd, win32.ctypes.byref(rect)):
+            raise win32.ctypes.WinError(win32.ctypes.get_last_error())
+        return rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top
 
     def reposition(self) -> None:
         """把挂件摆回游戏旁边。用户手动点「归位」时走这里。"""

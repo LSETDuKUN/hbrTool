@@ -12,6 +12,12 @@ from tools import read_frames
 
 
 class ReviewRegressionTests(unittest.TestCase):
+    def test_font_dpi_does_not_rescale_window_coordinates(self):
+        from hbr_capture.widget import Widget
+        widget = Widget.__new__(Widget)
+        widget.root = SimpleNamespace(winfo_fpixels=lambda unit: 144)
+        self.assertEqual(widget._dpi_factor(), 1.0)
+
     def test_exports_only_resolved_total_damage(self):
         def reading(value, label, unresolved=0):
             return SimpleNamespace(value=value, text=str(value), label=label,
