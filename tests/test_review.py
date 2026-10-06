@@ -12,6 +12,91 @@ from tools import read_frames
 
 
 class ReviewRegressionTests(unittest.TestCase):
+    def test_real_frame_event_is_labeled_once_and_saved_with_metadata(self):
+        from PIL import Image
+        from hbr_capture.capture import Frame
+        from hbr_capture.monitor import Monitor, MonitorConfig
+        fixture = Path(__file__).resolve().parents[1] / "results/20261006-142335/000045.png"
+        with Image.open(fixture) as source:
+            image = source.convert("RGBA")
+            frame = Frame(image.width, image.height, image.tobytes("raw", "BGRA"),
+                          non_black_ratio=1)
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            monitor = Monitor(MonitorConfig(outdir=Path(tmp), damage_trigger=True,
+                reject_flash=False, on_damage=events.append, quiet=True))
+            reader = monitor._ensure_reader()
+            with patch.object(reader.label_store, "read", wraps=reader.label_store.read) as label:
+                with patch("hbr_capture.monitor.time.time", return_value=0):
+                    monitor._check_damage(frame, 0)
+                self.assertEqual(label.call_count, 0)
+                with patch("hbr_capture.monitor.time.time", return_value=.35):
+                    monitor._check_damage(frame, 0)
+                self.assertEqual(label.call_count, 1)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["readings"][0]["value"], 32774)
+            record = json.loads((Path(tmp) / "index.jsonl").read_text(encoding="utf-8"))
+            self.assertEqual(record["damage"], events[0]["readings"])
+
+    def event_monitor(self):
+        from hbr_capture.monitor import Monitor, MonitorConfig
+        events = []
+        monitor = Monitor(MonitorConfig(damage_stable_seconds=.3,
+            damage_disappear_grace=.2, on_damage=events.append))
+        monitor._save = lambda *args, **kwargs: True
+        return monitor, events
+
+    def test_stable_replacement_without_empty_frame_is_another_hit(self):
+        monitor, events = self.event_monitor()
+        for now, value in ((0, 4238), (.31, 4238), (.4, 519), (.71, 519), (2, 519)):
+            monitor.observe_damage((value,), len(str(value)), "frame", 0, now)
+        self.assertEqual([e["readings"][0]["value"] for e in events], [4238, 519])
+
+    def test_changed_number_after_short_gap_keeps_both_hits(self):
+        monitor, events = self.event_monitor()
+        monitor.observe_damage((4238,), 4, "frame", 0, 0)
+        monitor.observe_no_damage(.1)
+        monitor.observe_damage((519,), 3, "frame", 0, .32)
+        monitor.observe_damage((519,), 3, "frame", 0, .64)
+        self.assertEqual([e["readings"][0]["value"] for e in events], [4238, 519])
+
+    def test_dropout_and_fragment_do_not_repeat_lingering_damage(self):
+        monitor, events = self.event_monitor()
+        monitor.observe_damage((4238,), 4, "frame", 0, 0)
+        monitor.observe_damage((4238,), 4, "frame", 0, .31)
+        monitor.observe_damage((238,), 3, "frame", 0, .4)
+        monitor.observe_damage((238,), 3, "frame", 0, .72)
+        monitor.observe_no_damage(.8)
+        monitor.observe_no_damage(1.01)
+        monitor.observe_damage((4238,), 4, "frame", 0, 1.1)
+        monitor.observe_damage((4238,), 4, "frame", 0, 8)
+        self.assertEqual(len(events), 1)
+
+    def test_settle_cannot_save_a_pending_damage_event(self):
+        monitor, _ = self.event_monitor()
+        monitor.observe_damage((1700918,), 7, "frame", 0, 0)
+        self.assertTrue(monitor._damage_already_saved())
+
+    def test_live_sums_distinguish_average_unknown_and_incomplete(self):
+        from hbr_capture.widget import Widget
+        from unittest.mock import MagicMock
+        widget = Widget.__new__(Widget)
+        widget.damage_readings = []
+        widget.reading_sum = widget.total_damage = 0
+        widget.txt_damage = MagicMock()
+        widget.lbl_damage_sum = MagicMock()
+        widget.lbl_total_damage = MagicMock()
+        widget._display_damage({"readings": [
+            {"value": 100, "label": "合计"},
+            {"value": 200, "label": "平均"},
+            {"value": 300, "label": "未知"},
+            {"value": 40, "label": "合计", "unresolved": 1}]})
+        self.assertEqual(len(widget.damage_readings), 4)
+        self.assertEqual(widget.reading_sum, 600)
+        self.assertEqual(widget.total_damage, 100)
+        widget.lbl_damage_sum.config.assert_called_with(text="读数累计: 600")
+
+
     def test_font_dpi_does_not_rescale_window_coordinates(self):
         from hbr_capture.widget import Widget
         widget = Widget.__new__(Widget)

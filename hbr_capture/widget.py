@@ -80,7 +80,7 @@ class WidgetConfig:
     #: 300 宽 + 边框几乎正好占满，留不出余量。
     width: int = 280
     height: int = 960
-    fps: float = 5.0
+    fps: float = 15.0
     method: str = "auto"
     hotkey_name: Optional[str] = "F9"
     stop_hotkey_name: Optional[str] = "F10"
@@ -96,7 +96,7 @@ class WidgetConfig:
     damage_recheck: int = 1
     #: 同一个数值"连续可见"多久之内算同一次命中（动画长的数字会停留好几秒）
     damage_gap_seconds: float = 2.0
-    damage_min_run: int = 3
+    damage_min_run: int = 1
 
 
 def compute_placement(
@@ -164,6 +164,9 @@ class Widget:
         self._restarts = 0
         self._prompted_run = None
         self._monitor_started_at = 0.0
+        self.damage_readings = []
+        self.reading_sum = 0
+        self.total_damage = 0
 
         self._build_ui()
 
@@ -269,6 +272,24 @@ class Widget:
         )
         self.btn_open.pack(side="left", fill="x", expand=True, padx=(4, 0))
 
+        # ---- 实时伤害：每个定稿事件只入账一次，停止后保留。
+        self.lbl_damage_sum = tk.Label(root, text="读数累计: 0", bg=PANEL, fg=ACCENT,
+            font=bold, anchor="w")
+        self.lbl_damage_sum.pack(fill="x", padx=8)
+        self.lbl_total_damage = tk.Label(root, text="确认总伤害: 0", bg=PANEL, fg=FG,
+            font=small, anchor="w")
+        self.lbl_total_damage.pack(fill="x", padx=8)
+        tk.Label(root, text="读数累计含平均；确认总伤害仅含合计", bg=BG, fg=DIM,
+            font=tiny).pack(fill="x", padx=8)
+        damage_wrap = tk.Frame(root, bg=BG)
+        damage_wrap.pack(fill="x", padx=8, pady=4)
+        self.txt_damage = tk.Text(damage_wrap, height=5, bg=PANEL, fg=FG,
+            font=("Consolas", 8), wrap="word", state="disabled")
+        damage_scroll = tk.Scrollbar(damage_wrap, command=self.txt_damage.yview)
+        self.txt_damage.configure(yscrollcommand=damage_scroll.set)
+        damage_scroll.pack(side="right", fill="y")
+        self.txt_damage.pack(side="left", fill="both", expand=True)
+
         # ---- 日志
         log_wrap = tk.Frame(root, bg=BG)
         log_wrap.pack(fill="both", expand=True, padx=8, pady=(4, 2))
@@ -310,6 +331,28 @@ class Widget:
     def _on_log_thread(self, line: str) -> None:
         self.queue.put(("log", line))
 
+    def _on_damage_thread(self, event: dict) -> None:
+        self.queue.put(("damage", event))
+
+    def _display_damage(self, event: dict) -> None:
+        self.txt_damage.config(state="normal")
+        for reading in event["readings"]:
+            self.damage_readings.append(reading)
+            value = reading["value"]
+            label = reading["label"]
+            resolved = not reading.get("unresolved", 0)
+            if resolved:
+                self.reading_sum += value
+                if label == "合计":
+                    self.total_damage += value
+            flag = "（残缺，不累计）" if not resolved else ""
+            self.txt_damage.insert("end", f"{len(self.damage_readings):03d} [{label}] "
+                f"{reading.get('text', value)} {flag}\n")
+        self.txt_damage.see("end")
+        self.txt_damage.config(state="disabled")
+        self.lbl_damage_sum.config(text=f"读数累计: {self.reading_sum:,}")
+        self.lbl_total_damage.config(text=f"确认总伤害: {self.total_damage:,}")
+
     def _should_stop_thread(self) -> bool:
         return self._stop.is_set()
 
@@ -322,6 +365,8 @@ class Widget:
                 item = self.queue.get_nowait()
                 if item[0] == "log":
                     self._log(item[1])
+                elif item[0] == "damage":
+                    self._display_damage(item[1])
                 elif item[0] == "frame":
                     latest = item  # 只保留最新的一帧，避免刷新落后
         except queue.Empty:
@@ -392,6 +437,15 @@ class Widget:
         """开始。窗口还没开也没关系 —— 会一直重试到游戏出现。"""
         if self.thread is not None and self.thread.is_alive():
             return
+        if self._want_running:
+            return
+        self.damage_readings.clear()
+        self.reading_sum = self.total_damage = 0
+        self.txt_damage.config(state="normal")
+        self.txt_damage.delete("1.0", "end")
+        self.txt_damage.config(state="disabled")
+        self.lbl_damage_sum.config(text="读数累计: 0")
+        self.lbl_total_damage.config(text="确认总伤害: 0")
         self._want_running = True
         self._retries = 0
         self.btn_toggle.config(text="取消", bg="#3a3a4e")
@@ -452,6 +506,7 @@ class Widget:
             minimize_console=False,   # 挂件模式下不要动控制台
             on_frame=self._on_frame_thread,
             on_log=self._on_log_thread,
+            on_damage=self._on_damage_thread,
             should_stop=self._should_stop_thread,
             damage_trigger=self.cfg.damage_trigger,
             damage_recheck=self.cfg.damage_recheck,

@@ -503,7 +503,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--outdir", default="frames")
     p.add_argument("--width", type=int, default=280, help="挂件宽度（默认 280，窄长）")
     p.add_argument("--height", type=int, default=960, help="挂件高度（默认 960）")
-    p.add_argument("--fps", type=float, default=5.0)
+    p.add_argument("--fps", type=float, default=15.0)
     p.add_argument("--method", default="auto",
                    choices=["auto", "printwindow", "screendc", "bitblt"])
     p.add_argument("--hotkey", default="F9", help="抓当前帧热键（默认 F9）")

@@ -50,6 +50,7 @@ class MonitorConfig:
     # 给 GUI 挂件用的回调。on_frame 每抓一帧调一次，on_log 每条日志调一次。
     on_frame: Optional[Callable] = None
     on_log: Optional[Callable] = None
+    on_damage: Optional[Callable] = None
     # 外部（GUI）请求停止。返回 True 就收工。
     should_stop: Optional[Callable] = None
 
@@ -66,10 +67,12 @@ class MonitorConfig:
     #: 一次"伤害事件"要连续可见这么久、数值也不变，才算定稿可以存。
     #: 伤害数字出场时会在屏幕上**滚动**（实测 495→501），中途还会切分不全
     #: （同一个 4238 读出过 428 / 238），所以要等它稳下来。
-    damage_stable_seconds: float = 0.8
+    damage_stable_seconds: float = 0.3
     #: 数字从画面上消失多久之后，才把缓冲里那一帧存下来。
     #: 留个余量是为了扛住特效一闪造成的"假消失"。
-    damage_disappear_grace: float = 0.6
+    damage_disappear_grace: float = 0.2
+    # A brief OCR dropout of the same lingering value is not a new hit.
+    damage_same_value_grace: float = 0.6
     reject_flash: bool = True          # 全白闪帧不要
     #: 提高到 0.85（原来是 0.55）。改成内容触发之后，闪白帧只有"恰好认出
     #: 伤害数字"才会被存 —— 也就是说它上面确实有可读的数字，不该丢。
@@ -115,6 +118,9 @@ class Monitor:
         self._event_flushed = False
         self._missing_since = None     # 数字从哪一刻开始看不见了
         self._damage_visible = False   # 上一帧看到数字了吗（判"新的一次命中"靠它）
+        self._replacement_key = None
+        self._replacement_since = 0.0
+        self._confirmed_readings = []
 
         self.damage_hits = 0
         self.flash_skipped = 0
@@ -325,6 +331,8 @@ class Monitor:
                 "bytes": size,
                 "broken": not frame.ok,
             }
+            if trigger == "damage":
+                record["damage"] = self._confirmed_readings
             with (self.cfg.outdir / "index.jsonl").open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -368,8 +376,8 @@ class Monitor:
         实测结果里同一个 `1829591` 被存了 3 张（damage 一张 + settle 两张）。
         """
         return (
-            self._current_damage_key is not None
-            and self._current_damage_key == self._saved_damage_key
+            self._damage_visible
+            or self._current_damage_key is not None
         )
 
     def _begin_event(self, key, digits: int, frame: Frame, diff: float, now: float) -> None:
@@ -381,6 +389,7 @@ class Monitor:
         self._event_last_seen = now
         self._event_flushed = False
         self._missing_since = None
+        self._replacement_key = None
 
     def _flush_event(self, now: float) -> None:
         """把缓冲的这一次伤害事件存下来（只存一帧）。"""
@@ -388,6 +397,20 @@ class Monitor:
         key = self._event_key
         if frame is None or key is None:
             return
+
+        readings = [{"value": v, "text": str(v), "label": "未知",
+                     "confidence": 0.0, "unresolved": 0} for v in key]
+        if self.cfg.damage_trigger:
+            try:
+                found = self._read_damage_frame(frame, recognize_labels=True)
+                recognized = [dict(value=r.value, text=r.text, label=r.label,
+                    confidence=r.confidence, label_score=r.label_score,
+                    unresolved=r.unresolved) for r in found]
+                if recognized:
+                    readings = recognized
+            except Exception as exc:
+                self._say(f"伤害标签读取失败，保留未知读数: {exc}")
+        self._confirmed_readings = readings
 
         self._event_flushed = True
         self._event_frame = None          # 释放掉，别再占内存
@@ -398,7 +421,20 @@ class Monitor:
 
         text = ", ".join(f"{value:,}" for value in key)
         self._say(f"      >> 伤害 {text}")
-        self._save(frame, "damage", self._event_diff, dedup=False)
+        if self._save(frame, "damage", self._event_diff, dedup=False) is not False:
+            if self.cfg.on_damage is not None:
+                self.cfg.on_damage({"run": self.run_id, "file": f"{self.seq:06d}.png",
+                    "readings": readings})
+
+    def _read_damage_frame(self, frame, recognize_labels=False):
+        import numpy as np
+        reader = self._ensure_reader().for_frame(frame.width, frame.height)
+        (y0, y1), (x0, x1) = reader.y_band, reader.x_band
+        if frame.height < y1 or frame.width < x1:
+            return []
+        arr = np.frombuffer(frame.bgra, dtype=np.uint8).reshape(frame.height, frame.width, 4)
+        return reader.read_band(arr[y0:y1, x0:x1, 2::-1].copy(),
+                                recognize_labels=recognize_labels)
 
     def _check_damage(self, frame: Frame, diff: float) -> None:
         """看这一帧有没有伤害数字；有的话攒成"伤害事件"，定稿后只存一帧。
@@ -420,16 +456,7 @@ class Monitor:
         except ImportError:
             return
 
-        reader = self._ensure_reader().for_frame(frame.width, frame.height)
-        (y0, y1), (x0, x1) = reader.y_band, reader.x_band
-        if frame.height < y1 or frame.width < x1:
-            return
-
-        arr = np.frombuffer(frame.bgra, dtype=np.uint8).reshape(
-            frame.height, frame.width, 4
-        )
-        band = arr[y0:y1, x0:x1, 2::-1].copy()   # BGRA -> RGB
-        found = reader.read_band(band)
+        found = self._read_damage_frame(frame)
         now = time.time()
 
         if not found:
@@ -455,10 +482,32 @@ class Monitor:
         抽出来是为了能单测 —— 这一段的判据踩过好几种坑
         （滚动、切分残缺、特效一闪造成的假消失），值得有回归测试兜着。
 
-        `_damage_visible` 是关键：**只有数字从"看不见"变成"看得见"才算新的一次命中**。
-        定稿（flush）之后数字往往还挂在屏幕上，这时候不能再开新事件，
-        否则同一个数字会被反复存 —— 这个 bug 真的写出来过。
+        消失后重现或定稿后出现不同的稳定数字，都可以开启新事件。
+        同一数字持续挂着、短暂漏识别及残缺切分不应重复入账。
         """
+        if (self._missing_since is not None
+                and now - self._missing_since >= self.cfg.damage_disappear_grace):
+            self.observe_no_damage(now)
+
+        if (not self._damage_visible and self._event_flushed
+                and key == self._event_key
+                and now - self._event_last_seen < self.cfg.damage_same_value_grace):
+            self._damage_visible = True
+
+        # A different stable number after a completed event is the next hit,
+        # even when no empty frame was sampled between the two numbers.
+        if self._damage_visible and self._event_flushed:
+            fragment = (len(key) == len(self._event_key) and all(
+                str(v) in str(old) for v, old in zip(key, self._event_key)))
+            if key == self._event_key or fragment:
+                self._replacement_key = None
+            else:
+                if key != self._replacement_key:
+                    self._replacement_key = key
+                    self._replacement_since = now
+                elif now - self._replacement_since >= self.cfg.damage_stable_seconds:
+                    self._begin_event(key, digits, frame, diff, self._replacement_since)
+
         if not self._damage_visible:
             # 数字刚出现 —— 新的一次命中
             self._begin_event(key, digits, frame, diff, now)
@@ -473,6 +522,7 @@ class Monitor:
                 self._event_diff = diff
         self._damage_visible = True
         self._missing_since = None
+        self._event_last_seen = now
 
         if (
             not self._event_flushed
@@ -722,6 +772,8 @@ class Monitor:
             self._cleanup(minimized_console)
             raise
 
+        if cfg.damage_trigger and self._event_frame is not None and not self._event_flushed:
+            self._flush_event(time.time())
         total_time = time.time() - started
         summary = {
             "saved": self.seq,

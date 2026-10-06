@@ -253,20 +253,20 @@ class DamageReader:
             label_store=self.label_store,
         )
 
-    def read_band(self, rgb_band: np.ndarray) -> List[DamageRead]:
+    def read_band(self, rgb_band: np.ndarray, recognize_labels: bool = True) -> List[DamageRead]:
         """识别一个**已经裁到伤害带**的图。
 
         实时抓帧时用这个：整帧识别要 31ms，只对伤害带识别只要 4.4ms。
         """
         height, width = rgb_band.shape[:2]
-        return self._read_with_bands(rgb_band, (0, height), (0, width))
+        return self._read_with_bands(rgb_band, (0, height), (0, width), recognize_labels)
 
     def read(self, source) -> List[DamageRead]:
         """从一整帧里读出所有伤害数字（一帧可能有多个）。"""
         rgb = _as_rgb(source)
         return self._read_with_bands(rgb, self.y_band, self.x_band)
 
-    def _read_with_bands(self, rgb, y_band, x_band) -> List[DamageRead]:
+    def _read_with_bands(self, rgb, y_band, x_band, recognize_labels=True) -> List[DamageRead]:
         mask = segment.near_white_mask(rgb)
         lines = extract_damage_lines(
             mask, y_band, x_band,
@@ -304,7 +304,10 @@ class DamageReader:
 
             # 标签决定这个数字是"总和"还是"平均值"，含义天差地别，必须一起读。
             # 注意：标签是「平均伤害」时，总和 = 平均值 × 怪物数。
-            label_result = self.label_store.read(rgb, (x0, y0, x1, y1))
+            label_result = (
+                self.label_store.read(rgb, (x0, y0, x1, y1))
+                if recognize_labels else None
+            )
             results.append(
                 DamageRead(
                     value=int(digits_text),
@@ -313,8 +316,8 @@ class DamageReader:
                     box=(x0, y0, x1, y1),
                     digits=len(scored),
                     unresolved=unresolved,
-                    label=label_result.name,
-                    label_score=label_result.score,
+                    label=label_result.name if label_result else "未知",
+                    label_score=label_result.score if label_result else 0.0,
                 )
             )
         return results
