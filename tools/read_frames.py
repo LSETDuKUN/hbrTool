@@ -137,7 +137,7 @@ def main(argv=None) -> int:
                 continue
             for hit in item["hits"]:
                 tag = hit["label"]
-                if tag == "合计":
+                if tag == "合计" and not hit["unresolved"]:
                     subtotal += hit["value"]
                 elif tag == "平均":
                     average_sum += hit["value"]
@@ -172,7 +172,7 @@ def main(argv=None) -> int:
     if args.json_out:
         Path(args.json_out).write_text(
             json.dumps(
-                {"frames": readings, "total": grand}, ensure_ascii=False, indent=2
+                {"frames": readings, "total": total_sum}, ensure_ascii=False, indent=2
             ),
             encoding="utf-8",
         )
@@ -188,6 +188,8 @@ def main(argv=None) -> int:
             actions = []
             for item in by_turn[turn]:
                 for hit in item["hits"]:
+                    if hit["label"] != "合计" or hit["unresolved"]:
+                        continue
                     actions.append(
                         {
                             "character": item["file"],

@@ -33,7 +33,9 @@ def read_index(outdir) -> List[dict]:
         if not line:
             continue
         try:
-            records.append(json.loads(line))
+            record = json.loads(line)
+            if isinstance(record, dict):
+                records.append(record)
         except json.JSONDecodeError:
             continue
     return records
@@ -59,7 +61,7 @@ def remove_run_from_index(outdir, run_id: str) -> int:
         except json.JSONDecodeError:
             kept.append(line)          # 坏行原样留着
             continue
-        if record.get("run") == run_id:
+        if isinstance(record, dict) and record.get("run") == run_id:
             removed += 1
         else:
             kept.append(line)
@@ -74,6 +76,32 @@ def _sidecar(path: Path) -> Optional[Path]:
     """raw 格式会多一个 .json 边车文件。"""
     side = Path(str(path) + ".json")
     return side if side.exists() else None
+
+
+def _safe_child(root: Path, name: str) -> Path:
+    """Reject malformed index paths before any file is moved or recycled."""
+    if not isinstance(name, str) or not name or Path(name).name != name:
+        raise ValueError(f"Invalid session filename: {name!r}")
+    path = root / name
+    if path.resolve().parent != root.resolve():
+        raise ValueError(f"Session path escapes output directory: {name!r}")
+    return path
+
+
+def _run_files(outdir: Path, run_id: str, records: List[dict]) -> List[Path]:
+    _safe_child(outdir, run_id)
+    paths = []
+    for record in records:
+        path = _safe_child(outdir, record.get("file"))
+        if path.is_file():
+            paths.append(path)
+        side = _sidecar(path)
+        if side is not None:
+            paths.append(_safe_child(outdir, side.name))
+    paths.extend(_run_sidecars(outdir, run_id))
+    for path in paths:
+        _safe_child(outdir, path.name)
+    return list(dict.fromkeys(paths))
 
 
 def _run_sidecars(outdir, run_id: str) -> List[Path]:
@@ -92,24 +120,16 @@ def archive_run(
     """把这次会话的帧搬到 results/<run_id>/。返回目标目录；没有帧则返回 None。"""
     outdir = Path(outdir)
     records = run_records(outdir, run_id)
+    files = _run_files(outdir, run_id, records)
     if not records:
         return None
 
     root = Path(results_root) if results_root else outdir.parent / "results"
     dest = root / run_id
-    dest.mkdir(parents=True, exist_ok=True)
+    dest.mkdir(parents=True, exist_ok=False)
 
-    for record in records:
-        source = outdir / record.get("file", "")
-        if source.exists():
-            shutil.move(str(source), str(dest / source.name))
-        side = _sidecar(source)
-        if side is not None:
-            shutil.move(str(side), str(dest / side.name))
-
-    # 这次会话的日志和配置也一起搬走
-    for extra in _run_sidecars(outdir, run_id):
-        shutil.move(str(extra), str(dest / extra.name))
+    for source in files:
+        shutil.move(str(source), str(dest / source.name))
 
     # 归档目录里放一份只含本次会话的 index
     (dest / "index.jsonl").write_text(
@@ -130,15 +150,7 @@ def discard_run(outdir, run_id: str) -> int:
     outdir = Path(outdir)
     records = run_records(outdir, run_id)
 
-    targets: List[Path] = []
-    for record in records:
-        path = outdir / record.get("file", "")
-        if path.exists():
-            targets.append(path)
-        side = _sidecar(path)
-        if side is not None:
-            targets.append(side)
-    targets.extend(_run_sidecars(outdir, run_id))
+    targets = _run_files(outdir, run_id, records)
 
     if targets and not recycle(targets):
         raise RuntimeError(
