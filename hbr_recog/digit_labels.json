@@ -1,0 +1,17 @@
+{
+  "_comment": "聚类索引 -> 字符。索引来自 tools/harvest_glyphs.py 的输出顺序（按类内样本数降序）。改了采集/分割参数后索引会漂，必须重跑 harvest 对着拼图核对。",
+  "_how_to_check": "重建后 tools/build_templates.py 会回读已知帧并打印识别结果。349297 / 5400615 / 1765007 / 5691092 这些对得上，就说明标注是对的。",
+  "_built_from": "36 frames, NEAR_WHITE=235, y-band 440-780, min-run 4, min-row-pixels 40, cluster threshold 0.65, 连通块清理已开启",
+  "labels": {
+    "0": "9",
+    "1": "1",
+    "2": "0",
+    "3": "7",
+    "4": "5",
+    "5": "2",
+    "6": "6",
+    "7": "4",
+    "8": "3",
+    "9": "8"
+  }
+}

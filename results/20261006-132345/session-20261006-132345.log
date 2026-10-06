@@ -1,0 +1,14 @@
+开始抓图自检（约 2 秒）...
+  抓图自检: screendc 拿到的是活画面 ✅
+  提示: 游戏当前不是前台窗口。screendc 要求它可见且没被盖住。
+  遮挡检查: 游戏完整可见 ✅
+监视中，热键 [F9] 抓当前帧，[F10] 停止，画面稳定后自动存。抓图方式 [screendc]。Ctrl+C 结束。
+完整日志: F:\dsh\Eworkspace\hbr\frames\session-20261006-132345.log
+  #0037 [settle  ] 000037.png  2048x1152  peak=1.000
+  #0038 [settle  ] 000038.png  2048x1152  peak=0.355
+  #0039 [settle  ] 000039.png  2048x1152  peak=0.542
+
+收到停止请求，收工。
+
+汇总: 存了 39 帧 {'settle': 3}，跳过 0 张重复图，抓帧 473 次，实际 4.98 fps，用时 95.0s
+输出目录: F:\dsh\Eworkspace\hbr\frames

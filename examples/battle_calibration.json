@@ -1,0 +1,30 @@
+{
+  "boss": {
+    "name": "死亡蛐螭EX",
+    "dp_max": 50000000,
+    "hp_max": 100000000,
+    "break_rate": 1.0
+  },
+  "od": {
+    "od_per_level": 100.0,
+    "max_level": 3
+  },
+  "od_initial_accumulated": 0.0,
+  "turns": [
+    {
+      "turn": 9,
+      "observed_od_percent": 100.0,
+      "actions": [
+        {
+          "character": "占位角色",
+          "kind": "skill",
+          "skill": "占位技能",
+          "hits": 5,
+          "combo_orbs": 0,
+          "chain_bonus": 0.0,
+          "damage": 90145506
+        }
+      ]
+    }
+  ]
+}

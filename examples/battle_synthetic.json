@@ -1,0 +1,58 @@
+{
+  "boss": {
+    "name": "示例Boss",
+    "dp_max": 10000,
+    "hp_max": 10000,
+    "break_rate": 2.0
+  },
+  "od": {
+    "od_per_level": 100.0,
+    "max_level": 3
+  },
+  "turns": [
+    {
+      "turn": 1,
+      "observed_od_percent": 35.875,
+      "actions": [
+        {
+          "character": "月城最中",
+          "kind": "skill",
+          "skill": "得意洋洋",
+          "hits": 5,
+          "combo_orbs": 2,
+          "chain_bonus": 0.15,
+          "damage": 3000
+        },
+        {
+          "character": "佐月",
+          "kind": "skill",
+          "skill": "连击",
+          "hits": 3,
+          "combo_orbs": 0,
+          "chain_bonus": 0.1,
+          "damage": 2000
+        },
+        {
+          "character": "月城最中",
+          "kind": "normal",
+          "damage": 1500
+        }
+      ]
+    },
+    {
+      "turn": 2,
+      "observed_od_percent": 50.25,
+      "actions": [
+        {
+          "character": "月城最中",
+          "kind": "skill",
+          "skill": "充能注入",
+          "hits": 4,
+          "combo_orbs": 1,
+          "chain_bonus": 0.15,
+          "damage": 4000
+        }
+      ]
+    }
+  ]
+}

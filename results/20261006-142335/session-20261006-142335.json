@@ -1,0 +1,22 @@
+{
+  "run": "20261006-142335",
+  "match": null,
+  "hwnd": null,
+  "title": "HeavenBurnsRed",
+  "process": "E:\\HeavenBurnsRed\\HeavenBurnsRed Game\\HeavenBurnsRed.exe",
+  "client_size": [
+    2048,
+    1152
+  ],
+  "method_requested": "auto",
+  "method_used": "screendc",
+  "fps": 5.0,
+  "hotkey": "F9",
+  "on_change": 0.02,
+  "settle": 0.4,
+  "interval": null,
+  "format": "png",
+  "png_level": 1,
+  "dedup": true,
+  "started": "2026-10-06 14:23:36"
+}
