@@ -2,6 +2,34 @@
 
 在挂件底部点 **资料室 ↗**，或双击 `启动资料室.bat`。资料室是独立窗口，不改变挂件的战斗统计或位置。
 
+风格与角色头像显示在列表和详情中；可用的 Boss/小怪图标也按敌人记录关联。点击「同步头像」独立补充图像，不必重新下载全部数值资料。
+本次实际获取结果见 [ASSET_COVERAGE.md](ASSET_COVERAGE.md)。
+
+技能详情使用独立圆角卡片。威力范围、上限属性差、属性权重、Hit 数和 DP/HP/破坏倍率分行展示。逐 Hit 倍率显示为 `0.3 + 0.7`，超过 6 段默认折叠；成长、元数据、次要效果和其他原始资料也可展开。正常浏览不再显示 JSON 字典，原文仅放在「原始数据（高级）」页。
+
+### 头像与技能详情接口
+
+- `AssetStore.get(region, dataset, entity_id)`：返回本地路径、来源 URL、SHA256、原文件名与状态；未获取到的图标不伪装为成功。
+- `AssetStore.paths(region, dataset, entity_ids)`：批量返回缓存头像路径，供列表、队伍编成或战斗界面复用。
+- `DetailService.record(record_key)`：返回记录基本资料、头像引用与独立技能对象列表。
+- `DetailService.skills(region, skill_id)`：返回指定服务器技能的全部主表变体。
+- `SkillDetail`：Hit 数、SP、说明、逐 Hit 数据与效果段。
+- `EffectDetail`：威力、属性差、六维权重、属性、DP/HP/破坏倍率、该效果自己的逐 Hit 数据、条件和成长。
+- `HitDetail`：序号、时点/类型、原始 `power_ratio`。技能级分配和效果级分配分别保存，不相加也不相互覆盖。
+
+缺失逐 Hit 数据返回空元组，缺失倍率返回 `None`；不会按 Hit 数自动平均分配。后续人工录入可通过独立覆盖层接入，当前不修改原始来源。显示层中的 `-1` Hit 显示为“不适用 / 来源未定义”，接口仍保留原值。
+
+图标保存在 `data/quest/portraits/`，关联与下载结果在 `data/quest/portraits.json`。按候选 URL 去重、按内容 SHA256 保存原图；只下载头像/图标，不下载角色立绘。图像先解码校验，网络错误会在下次同步重试；已确认 404 默认不反复请求，程序接口可传 `retry_missing=True` 再检查。跨进程锁在程序退出时由系统释放，索引原子更新并处理 Windows 短暂文件占用。
+
+```python
+from hbr_data.assets import AssetStore
+from hbr_data.details import DetailService
+
+portrait = AssetStore().get("jp", "styles", "1001103")
+variants = DetailService().skills("jp", "46001106")
+ratios = [hit.ratio for hit in variants[0].hits]
+```
+
 ## 使用
 
 - **查资料**：选服务器、类别，输入名称、ID、角色名或原文关键词，点击搜索。每页 250 条。日服额外支持网站提供的繁体中文参考名；各服务器数值独立保存。
@@ -13,7 +41,7 @@
 
 ## 数据存储与后续计算接口
 
-下载源为 https://hbr.quest/ 实际页面模块引用的 https://master.hbr.quest/v1/ 公开 JSON。按日服（jp）、国服（cn）、国际服（en）区分；跟随角色、敌人、调整历史主表引用下载详表，不猜测未披露 ID。覆盖范围是可发现的公开数据接口，不包括图片、音视频，也不声称覆盖服务器未公开或未引用的文件。
+数值下载源为 https://hbr.quest/ 实际页面模块引用的 https://master.hbr.quest/v1/ 公开 JSON。按日服（jp）、国服（cn）、国际服（en）区分；跟随角色、敌人、调整历史主表引用下载详表，不猜测未披露 ID。头像通过网站的 cdn.hbr.quest / assets.hbr.quest 公开路径读取。覆盖范围不包括音视频，也不声称覆盖服务器未公开或未引用的文件。
 
 `data/quest/` 是本地缓存，不提交 Git。原始 JSON 字节和发现入口的页面脚本以 SHA256 命名保存到 `objects/`；每份来源记录 URL、抓取时间、字节数。原始文件可用于重新建立索引和审计字段。`manifest-*.json`、`catalog-*.sqlite3` 保留历史版本；只有新数据库建立成功才原子替换 `current.json`。下载阶段记录在 `staging.json`。
 

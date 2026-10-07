@@ -21,7 +21,7 @@ _connections = threading.local()
 
 def fetch(url):
     parsed = urlsplit(url)
-    if parsed.scheme != "https" or parsed.hostname not in {"hbr.quest", "master.hbr.quest"}:
+    if parsed.scheme != "https" or parsed.hostname not in {"hbr.quest", "master.hbr.quest", "cdn.hbr.quest", "assets.hbr.quest"}:
         raise ValueError("仅允许已配置的公开数据站点")
     headers = {"User-Agent": "Mozilla/5.0 HbrTool/1.0", "Accept": "*/*", "Accept-Encoding": "gzip"}
     for attempt in range(3):

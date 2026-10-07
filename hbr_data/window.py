@@ -2,10 +2,14 @@
 import json
 import queue
 import threading
+from collections import Counter
 import tkinter as tk
 from tkinter import ttk
 from .store import Catalog
 from .sync import sync
+from .details import DetailService
+from .cards import DetailCards
+from .assets import sync_portraits
 
 BG, CARD, FG, DIM, PINK = "#201d32", "#302b46", "#f7f0ff", "#bdb1d4", "#f5aacb"
 LABELS = {"skills": "技能", "characters": "角色", "styles": "风格", "enemies": "敌人",
@@ -23,6 +27,8 @@ ORDER BY power_max DESC"""
 class LibraryWindow:
     def __init__(self, master):
         self.catalog = Catalog()
+        self.details = DetailService(self.catalog)
+        self.asset_busy = False
         self.queue = queue.Queue()
         self.busy = False
         self.generation = 0
@@ -35,8 +41,22 @@ class LibraryWindow:
         w.minsize(760, 560)
         w.protocol("WM_DELETE_WINDOW", w.withdraw)
         style = ttk.Style(w)
+        # Windows' native theme ignores Treeview fieldbackground on empty space.
+        if "quest" not in style.theme_names():
+            style.theme_create("quest",parent="clam")
+        style.theme_use("quest")
+        style.configure("TNotebook",background=BG,borderwidth=0)
+        style.configure("TNotebook.Tab",background=CARD,foreground=DIM,padding=(12,8),font=("Microsoft YaHei UI",9,"bold"))
+        style.map("TNotebook.Tab",background=[("selected","#493752")],foreground=[("selected",PINK)])
+        style.configure("TCombobox",fieldbackground=CARD,background=CARD,foreground=FG,arrowcolor=PINK)
+        style.map("TCombobox",fieldbackground=[("readonly",CARD)],foreground=[("readonly",FG)])
+        style.configure("TScrollbar",background="#61506f",troughcolor=BG,arrowcolor=PINK,bordercolor=BG)
+        style.configure("Treeview.Heading",background="#493752",foreground=FG,relief="flat")
+        style.map("Quest.Browse.Treeview",background=[("selected","#665079")],foreground=[("selected","#ffffff")])
         style.configure("Quest.Treeview", background=CARD, fieldbackground=CARD, foreground=FG, rowheight=30)
         style.configure("Quest.Treeview.Heading", font=("Microsoft YaHei UI", 9, "bold"))
+        style.configure("Quest.Browse.Treeview", background=CARD, fieldbackground=CARD, foreground=FG,
+                        rowheight=52, font=("Microsoft YaHei UI",9))
         tk.Label(w, text="✦  星屑资料室", font=("Microsoft YaHei UI", 20, "bold"), bg=BG, fg=PINK).pack(anchor="w", padx=22, pady=(18, 2))
         self.status = tk.StringVar(value="本地资料 · 查询无需联网")
         top = tk.Frame(w, bg=BG)
@@ -44,6 +64,8 @@ class LibraryWindow:
         tk.Label(top, textvariable=self.status, bg=BG, fg=DIM, anchor="w").pack(side="left", fill="x", expand=True)
         self.update_button = tk.Button(top, text="同步网站资料", command=self.update, bg=PINK, relief="flat", padx=12)
         self.update_button.pack(side="right")
+        self.asset_button = tk.Button(top, text="同步头像", command=self.update_assets, bg=CARD, fg=PINK, relief="flat", padx=12)
+        self.asset_button.pack(side="right", padx=8)
         self.tabs = ttk.Notebook(w)
         self.tabs.pack(fill="both", expand=True, padx=18, pady=(0,18))
         browse = tk.Frame(self.tabs, bg=BG)
@@ -72,6 +94,13 @@ class LibraryWindow:
         panes.add(left, minsize=230, width=340)
         panes.add(right, minsize=340)
         self.tree = self.make_tree(left, ("id", "name"))
+        self.tree.configure(show="tree headings", style="Quest.Browse.Treeview")
+        self.tree.heading("#0",text="头像")
+        self.tree.column("#0",width=72,minwidth=72,stretch=False)
+        self.tree.heading("id",text="ID")
+        self.tree.column("id",width=100,minwidth=75,stretch=False)
+        self.tree.heading("name",text="名称")
+        self.tree_photos = []
         self.tree.bind("<<TreeviewSelect>>", self.select)
         paging = tk.Frame(left, bg=BG)
         paging.pack(fill="x")
@@ -79,10 +108,10 @@ class LibraryWindow:
         tk.Button(paging, text="下一页", command=lambda: self.page(1), relief="flat").pack(side="right")
         self.page_label = tk.Label(paging, bg=BG, fg=DIM)
         self.page_label.pack()
-        self.summary = self.make_text(right)
+        self.summary = DetailCards(right)
         self.raw = self.make_text(right)
-        right.add(self.summary.master, text="  数值与说明  ")
-        right.add(self.raw.master, text="  完整 JSON  ")
+        right.add(self.summary, text="  技能与数值  ")
+        right.add(self.raw.master, text="  原始数据（高级）  ")
         tk.Label(advanced, text="只读 SQLite · 单次最多 500 行 / 3 秒；支持 JOIN、聚合、JSON 查询。所有原始字段位于 raw_json。", bg=BG, fg=DIM).pack(anchor="w", padx=8, pady=8)
         self.sql = tk.Text(advanced, height=8, bg=CARD, fg=FG, insertbackground=FG, font=("Consolas", 11), relief="flat")
         self.sql.pack(fill="x", padx=8)
@@ -160,10 +189,15 @@ class LibraryWindow:
             key = source["region"] + "/" + source["table"]
             counts[key] = counts.get(key, 0) + 1
         report = "来源与覆盖报告\n\nhttps://hbr.quest/\nhttps://master.hbr.quest/v1/\n\n" + self.status.get()
-        report += "\n\n范围：站点公开模块引用的 JSON 表及表中列出的详细资料。图片/音视频不下载。无法发现的服务器文件不声称已覆盖。\n原始 JSON、页面脚本、SHA256、下载时间与历史版本均保存在 data/quest。\n\n"
+        report += "\n\n范围：站点公开模块引用的 JSON 表及表中列出的详细资料。头像与敌人图标可通过「同步头像」独立缓存；不下载立绘、音视频。无法发现的服务器文件不声称已覆盖。\n原始 JSON、页面脚本、SHA256、下载时间与历史版本均保存在 data/quest。\n\n"
         report += "\n".join(f"{key}: {count} 文件" for key,count in sorted(counts.items()))
         report += "\n\n不可用来源（不隐瞒缺项）：\n" + "\n".join(f"{url}\n  {error}" for url,error in manifest["errors"].items())
         report += "\n\nSQL 表：sources, records, translations, skills, skill_parts, skill_hits, skill_elements\n视图：characters, styles, enemies, style_skills, skill_catalog, skill_damage\n关联：skills.skill_key = skill_parts.skill_key；source_url → sources.url。\n同一技能可能出现在多个来源；skill_catalog / skill_damage 限定技能主表，仍保留表内条件变体；全部来源用 skills。"
+        portraits = self.details.assets.index()
+        counts = Counter((key.split('/')[1],value['status']) for key,value in portraits['records'].items())
+        report += "\n\n头像覆盖（关联记录数，多条记录可共用同一图片）：\n"
+        report += "\n".join(f"{LABELS.get(category,category)} · {status}: {count}" for (category,status),count in sorted(counts.items()))
+        report += "\n详细图像 URL、失败原因和本地路径见 data/quest/portraits.json。"
         self.set_text(self.coverage, report)
         self.search()
 
@@ -211,13 +245,32 @@ class LibraryWindow:
         def done(result, error):
             if error or generation != self.generation:
                 return
+            from PIL import ImageTk
+            rows, pictures = result
             self.tree.delete(*self.tree.get_children())
+            self.tree_photos.clear()
             self.keys = {}
-            for index, row in enumerate(result[1]):
+            for index, row in enumerate(rows):
                 self.keys[str(index)] = row[0]
-                self.tree.insert("", "end", iid=str(index), values=(row[1], row[2] or row[3]))
-            self.page_label.configure(text=f"第 {offset//250+1} 页 · {len(result[1])} 条")
-        self.task(lambda: self.catalog.query("SELECT record_key,id,COALESCE(NULLIF(name_zh,''),name),label FROM records WHERE region=? AND dataset=? AND (raw_json LIKE ? ESCAPE '\\' OR name_zh LIKE ? ESCAPE '\\') ORDER BY ordinal LIMIT 250 OFFSET ?", (region,dataset,pattern,pattern,offset)), done)
+                photo = ImageTk.PhotoImage(pictures[row[1]],master=self.tree) if row[1] in pictures else None
+                if photo:self.tree_photos.append(photo)
+                self.tree.insert("", "end", iid=str(index), image=photo or "",values=(row[1], row[2] or row[3]))
+            self.page_label.configure(text=f"第 {offset//250+1} 页 · {len(rows)} 条")
+        def find():
+            from PIL import Image
+            _, rows, _ = self.catalog.query("SELECT record_key,id,COALESCE(NULLIF(name_zh,''),name),label FROM records WHERE region=? AND dataset=? AND (raw_json LIKE ? ESCAPE '\\' OR name_zh LIKE ? ESCAPE '\\') ORDER BY ordinal LIMIT 250 OFFSET ?", (region,dataset,pattern,pattern,offset))
+            paths = self.details.assets.paths(region,dataset,[row[1] for row in rows])
+            pictures = {}
+            for entity_id,path in paths.items():
+                try:
+                    with Image.open(path) as source:
+                        picture = source.convert("RGBA")
+                        picture.thumbnail((44,44),Image.Resampling.LANCZOS)
+                        pictures[entity_id] = picture
+                except OSError:
+                    pass
+            return rows,pictures
+        self.task(find, done)
 
     def select(self, event=None):
         selected = self.tree.selection()
@@ -226,40 +279,27 @@ class LibraryWindow:
         key = self.keys[selected[0]]
         self.selection_generation += 1
         generation = self.selection_generation
-        def done(result, error):
-            if error or generation != self.selection_generation or not result[1]:
+        def done(record, error):
+            if error or generation != self.selection_generation:
                 return
-            raw, source, translated = result[1][0]
-            data = json.loads(raw)
-            self.set_text(self.raw, json.dumps(data, ensure_ascii=False, indent=2))
-            lines = [str(data.get("name", data.get("label", "资料"))) if isinstance(data,dict) else "资料", "", "来源：" + source]
-            if translated:
-                lines.insert(1, "中文参考名：" + translated)
-            def skill_info(skill):
-                lines.extend(["", str(skill.get("name", "技能")), str(skill.get("desc", "")),
-                    f"Hit 数：{skill.get('hit_count','未披露')}    SP：{skill.get('sp_cost','未披露')}    等级上限：{skill.get('max_level','未披露')}",
-                    f"技能逐 Hit 分配：{skill.get('hits') or '来源未提供'}"])
-                for index, part in enumerate(skill.get("parts", []), 1):
-                    mult = part.get("multipliers") or {}
-                    lines.extend([f"\n效果段 {index} · {part.get('skill_type')} · {part.get('type')} / {part.get('elements')}",
-                        f"基础威力范围：{part.get('power','未披露')}",
-                        f"达到上限的属性差：{part.get('diff_for_max','未披露')}",
-                        f"DP 倍率 ×{mult.get('dp','?')}    HP 倍率 ×{mult.get('hp','?')}    破坏倍率 ×{mult.get('dr','?')}",
-                        f"属性权重：{part.get('parameters')}", f"等级成长：{part.get('growth')}",
-                        f"逐 Hit 数据：{part.get('hits')}", f"条件：{part.get('cond') or '无'}",
-                        f"效果值：{part.get('value')}    特殊效果：{part.get('effect')}"])
-            if isinstance(data, dict):
-                if "hit_count" in data:
-                    skill_info(data)
-                else:
-                    lines.extend(["", str(data.get("desc", "")), "角色：" + str(data.get("chara", ""))])
-                    for skill in data.get("skills", []):
-                        skill_info(skill)
-                    if not data.get("skills"):
-                        lines.append(json.dumps(data, ensure_ascii=False, indent=2))
-            lines.extend(["", "基础威力不是实战伤害；buff、敌人防御、技能等级与条件等尚未代入。", "非攻击效果的 power 不表示伤害。空 hits 表示来源未给逐 Hit 分配，不擅自平均。", "所有未知字段和嵌套变体保留在「完整 JSON」。"])
-            self.set_text(self.summary, "\n".join(lines))
-        self.task(lambda: self.catalog.query("SELECT raw_json,source_url,name_zh FROM records WHERE record_key=?", (key,)), done)
+            self.summary.render(record)
+            self.set_text(self.raw, json.dumps(record["raw"], ensure_ascii=False, indent=2))
+        self.task(lambda: self.details.record(key), done)
+
+    def update_assets(self):
+        if self.asset_busy:
+            return
+        self.asset_busy = True
+        self.asset_button.configure(state="disabled")
+        def progress(text):
+            self.queue.put((lambda value, error:self.status.set(value), text, None))
+        def done(result, error):
+            self.asset_busy = False
+            self.asset_button.configure(state="normal")
+            if not error:
+                self.refresh()
+                self.status.set("头像同步完成；缺失资源已记录，可离线使用已缓存头像")
+        self.task(lambda: sync_portraits(self.catalog.root, progress=progress),done)
 
     def run_sql(self):
         sql = self.sql.get("1.0", "end").strip()
