@@ -7,3 +7,4 @@ frames2/
 frames_frozen_backup/
 *.log
 *.broken-backup
+data/quest/

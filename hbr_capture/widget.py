@@ -33,14 +33,14 @@ from .capture import Frame, Grabber
 from .monitor import Monitor, MonitorConfig
 from .session import archive_run, discard_run, run_records
 from .damage_stats import DamageLedger, enemy_count, pool_value, resource_state
-from .widget_ui import ResourceMeter
+from .widget_ui import ResourceMeter, RoundedCard, RoundedButton
 
 # ---- 配色
-BG = "#121724"
-PANEL = "#1d2333"
-FG = "#e6e6f0"
-DIM = "#8b8b9e"
-ACCENT = "#ff8d86"
+BG = "#201d32"
+PANEL = "#302b46"
+FG = "#f7f0ff"
+DIM = "#bdb1d4"
+ACCENT = "#f5aacb"
 OK = "#4ade80"
 WARN = "#fbbf24"
 ERR = "#f87171"
@@ -225,6 +225,7 @@ class Widget:
                        activebackground=ACCENT, activeforeground="white")
         menu_button.configure(menu=menu)
         menu.add_command(label="战斗设置 · DP / HP / 怪数", command=self._open_battle_settings)
+        menu.add_command(label="星屑资料室 · 角色 / 风格 / 技能", command=self._open_library)
         menu.add_separator()
         menu.add_command(label="抓取当前帧  F9", command=self.snap)
         menu.add_command(label="窗口归位", command=self.reposition)
@@ -238,10 +239,10 @@ class Widget:
                              command=self._toggle_topmost)
         menu.add_command(label="日志与诊断", command=self._toggle_details)
 
-        card = tk.Frame(root, bg=PANEL, padx=10, pady=8, highlightthickness=1,
-                        highlightbackground="#34374f")
-        card.pack(fill="x", padx=12, pady=6)
-        tk.Label(card, text="累计伤害", bg=PANEL, fg=DIM, font=small,
+        shell = RoundedCard(root, background=PANEL)
+        shell.pack(fill="x", padx=12, pady=6)
+        card = shell.content
+        tk.Label(card, text="✦  累计伤害", bg=PANEL, fg=DIM, font=small,
                  anchor="w").pack(fill="x")
         self._total_font = tkfont.Font(family="Segoe UI", size=18, weight="bold", slant="italic")
         self.lbl_damage_sum = tk.Label(card, text="0", bg=PANEL, fg=ACCENT,
@@ -256,9 +257,9 @@ class Widget:
 
         resources = tk.Frame(root, bg=BG)
         resources.pack(fill="x", padx=12, pady=(3, 5))
-        self.dp_meter = ResourceMeter(resources, "DP", "护盾", ("#4568ee", "#6ae1ff"))
+        self.dp_meter = ResourceMeter(resources, "DP", "护盾", ("#8b79eb", "#8ae6f5"))
         self.dp_meter.pack(fill="x", pady=(0, 6))
-        self.hp_meter = ResourceMeter(resources, "HP", "生命", ("#ea587c", "#ffb07d"))
+        self.hp_meter = ResourceMeter(resources, "HP", "生命", ("#e57bb4", "#ffd1ae"))
         self.hp_meter.pack(fill="x")
 
         targets = tk.Frame(root, bg=BG)
@@ -271,10 +272,12 @@ class Widget:
         self.lbl_enemy_hint = tk.Label(root, text="平均 × 怪数；修改后重算本轮",
             bg=BG, fg=DIM, font=tiny, anchor="w")
 
-        self.btn_toggle = tk.Button(root, text="开始", command=self.toggle, bg=ACCENT,
-            fg="white", activebackground="#ff7ba1", relief="flat", font=bold, pady=5)
+        self.btn_toggle = RoundedButton(root, text="开始", command=self.toggle, bg=ACCENT,
+            fg=BG, activebackground="#ffb9d7", relief="flat", font=bold, pady=5)
         self.btn_toggle.pack(fill="x", padx=12, pady=(0, 8))
         self.lbl_preview = tk.Label(root, bg=PANEL, bd=0)
+        footer = tk.Frame(root, bg=BG)
+        footer.pack(side="bottom", fill="x", padx=12, pady=(5, 8))
         self._content = tk.Frame(root, bg=BG)
         self._content.pack(fill="both", expand=True, padx=12)
         tk.Label(self._content, text="伤害明细", bg=BG, fg=FG, font=bold,
@@ -283,7 +286,7 @@ class Widget:
                  font=tiny, anchor="w").pack(fill="x", pady=(0, 5))
         damage_wrap = tk.Frame(self._content, bg=PANEL)
         damage_wrap.pack(fill="both", expand=True)
-        self.txt_damage = tk.Text(damage_wrap, height=4, bg=PANEL, fg=FG,
+        self.txt_damage = tk.Text(damage_wrap, height=1, bg=PANEL, fg=FG,
             font=("Microsoft YaHei UI", 8), wrap="word", state="disabled",
             relief="flat", highlightthickness=0, padx=6, pady=6)
         scroll = tk.Scrollbar(damage_wrap, command=self.txt_damage.yview)
@@ -328,12 +331,16 @@ class Widget:
         for tag, color in (("warn", WARN), ("err", ERR), ("ok", OK)):
             self.txt_log.tag_config(tag, foreground=color)
 
-        self.btn_details = tk.Button(root, text="日志与诊断 ↗", bg=BG, fg=DIM,
+        links = tk.Frame(footer, bg=BG)
+        links.pack(fill="x")
+        self.btn_details = tk.Button(links, text="日志 ↗", bg=BG, fg=DIM,
             relief="flat", font=tiny, command=self._toggle_details, anchor="w")
-        self.btn_details.pack(fill="x", padx=12, pady=(6, 2))
-        self.lbl_warn = tk.Label(root, text="", bg=BG, fg=WARN, font=tiny,
+        self.btn_details.pack(side="left")
+        tk.Button(links, text="✧  资料室 ↗", command=self._open_library,
+            bg=BG, fg=ACCENT, font=small, relief="flat").pack(side="right")
+        self.lbl_warn = tk.Label(footer, text="", bg=BG, fg=WARN, font=tiny,
                                 wraplength=cfg.width - 24, justify="left", anchor="w")
-        self.lbl_warn.pack(fill="x", padx=12, pady=(0, 8))
+        self.lbl_warn.pack(fill="x")
         self._render_resources()
         self._toggle_preview()
         self._log("挂件已就绪；未知和残缺读数不计入累计伤害。")
@@ -341,6 +348,13 @@ class Widget:
         self.root.after(2000, self._watchdog)
         self._place_beside(None)
         self.root.after(250, self.start)
+
+    def _open_library(self):
+        from hbr_data.window import LibraryWindow
+        if not getattr(self, "_library", None):
+            self._library = LibraryWindow(self.root)
+        self._library.window.deiconify()
+        self._library.window.lift()
 
     def _toggle_details(self):
         if self._details_visible:
@@ -647,7 +661,7 @@ class Widget:
         self._render_resources()
         self._want_running = True
         self._retries = 0
-        self.btn_toggle.config(text="取消", bg="#3a3a4e")
+        self.btn_toggle.config(text="取消", bg="#665879", fg=FG)
         self._connect()
 
     def _connect(self) -> None:
@@ -716,7 +730,7 @@ class Widget:
         self.thread = threading.Thread(target=self._run_monitor, daemon=True)
         self.thread.start()
         self._monitor_started_at = time.time()
-        self.btn_toggle.config(text="停止", bg="#3a3a4e")
+        self.btn_toggle.config(text="停止", bg="#665879", fg=FG)
 
     def _run_monitor(self) -> None:
         try:
@@ -756,7 +770,7 @@ class Widget:
             self.root.after(delay, self._connect)
             return
 
-        self.btn_toggle.config(text="开始", bg=ACCENT)
+        self.btn_toggle.config(text="开始", bg=ACCENT, fg=BG)
         self.lbl_target.config(text="已停止 · 可自由拖动", fg=DIM)
         self._log("已停止。")
         self._maybe_ask_keep()
