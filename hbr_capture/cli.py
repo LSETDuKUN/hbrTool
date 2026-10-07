@@ -400,6 +400,8 @@ def cmd_widget(args) -> int:
         topmost=not args.no_topmost,
         preview=not args.no_preview,
         enemy_count=args.enemy_count,
+        dp_max=args.dp,
+        hp_max=args.hp,
         ask_keep=not args.no_ask_keep,
         damage_trigger=not args.no_damage_trigger,
         damage_recheck=args.damage_recheck,
@@ -503,8 +505,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_target(p)
     p.add_argument("--outdir", default="frames")
     p.add_argument("--width", type=int, default=250, help="挂件宽度（默认 250）")
-    p.add_argument("--height", type=int, default=620, help="挂件高度（默认 620）")
+    p.add_argument("--height", type=int, default=760, help="挂件高度（默认 760）")
     p.add_argument("--enemy-count", type=int, default=1, help="怪物数量（平均伤害乘数）")
+    p.add_argument("--dp", type=int, default=0, help="量表初始 DP")
+    p.add_argument("--hp", type=int, default=0, help="量表初始 HP")
     p.add_argument("--fps", type=float, default=15.0)
     p.add_argument("--method", default="auto",
                    choices=["auto", "printwindow", "screendc", "bitblt"])

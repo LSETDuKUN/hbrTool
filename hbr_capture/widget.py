@@ -22,7 +22,7 @@ import threading
 import time
 import tkinter as tk
 import traceback
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from tkinter import font as tkfont
 from tkinter import messagebox
@@ -32,14 +32,15 @@ from . import win32
 from .capture import Frame, Grabber
 from .monitor import Monitor, MonitorConfig
 from .session import archive_run, discard_run, run_records
-from .damage_stats import DamageLedger
+from .damage_stats import DamageLedger, enemy_count, pool_value, resource_state
+from .widget_ui import ResourceMeter
 
 # ---- 配色
-BG = "#191922"
-PANEL = "#22222e"
+BG = "#121724"
+PANEL = "#1d2333"
 FG = "#e6e6f0"
 DIM = "#8b8b9e"
-ACCENT = "#ff5c8a"
+ACCENT = "#ff8d86"
 OK = "#4ade80"
 WARN = "#fbbf24"
 ERR = "#f87171"
@@ -80,7 +81,7 @@ class WidgetConfig:
     outdir: Path = Path("frames")
     #: 留出窗口边框余量，适配窗口模式下游戏右侧的窄空隙。
     width: int = 250
-    height: int = 620
+    height: int = 760
     fps: float = 15.0
     method: str = "auto"
     hotkey_name: Optional[str] = "F9"
@@ -92,6 +93,8 @@ class WidgetConfig:
     topmost: bool = True
     preview: bool = False
     enemy_count: int = 1
+    dp_max: int = 0
+    hp_max: int = 0
     ask_keep: bool = True      # 会话结束时问一句「这次的帧留着还是删掉」
     #: 认出伤害数字就立刻存。默认开 —— settle 会漏掉绝大部分伤害帧。
     damage_trigger: bool = True
@@ -179,6 +182,9 @@ class Widget:
         self.total_damage = 0
         self.ledger = DamageLedger()
         self.ledger.set_enemies(config.enemy_count)
+        self.cfg.dp_max = pool_value(config.dp_max, "DP")
+        self.cfg.hp_max = pool_value(config.hp_max, "HP")
+        self._settings_dialog = None
 
         self._build_ui()
 
@@ -199,7 +205,7 @@ class Widget:
         root.title("HBR 伤害")
         root.configure(bg=BG)
         root.geometry(f"{cfg.width}x{cfg.height}")
-        root.minsize(220, 480)
+        root.minsize(220, 640)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         root.attributes("-topmost", cfg.topmost)
         small = tkfont.Font(family="Microsoft YaHei UI", size=8)
@@ -218,6 +224,8 @@ class Widget:
         menu = tk.Menu(menu_button, tearoff=False, bg=PANEL, fg=FG,
                        activebackground=ACCENT, activeforeground="white")
         menu_button.configure(menu=menu)
+        menu.add_command(label="战斗设置 · DP / HP / 怪数", command=self._open_battle_settings)
+        menu.add_separator()
         menu.add_command(label="抓取当前帧  F9", command=self.snap)
         menu.add_command(label="窗口归位", command=self.reposition)
         menu.add_command(label="打开帧目录", command=self.open_dir)
@@ -230,31 +238,38 @@ class Widget:
                              command=self._toggle_topmost)
         menu.add_command(label="日志与诊断", command=self._toggle_details)
 
-        card = tk.Frame(root, bg=PANEL, padx=12, pady=12)
+        card = tk.Frame(root, bg=PANEL, padx=10, pady=8, highlightthickness=1,
+                        highlightbackground="#34374f")
         card.pack(fill="x", padx=12, pady=6)
         tk.Label(card, text="累计伤害", bg=PANEL, fg=DIM, font=small,
                  anchor="w").pack(fill="x")
-        self._total_font = tkfont.Font(family="Segoe UI", size=18, weight="bold")
+        self._total_font = tkfont.Font(family="Segoe UI", size=18, weight="bold", slant="italic")
         self.lbl_damage_sum = tk.Label(card, text="0", bg=PANEL, fg=ACCENT,
             font=self._total_font, anchor="w")
         self.lbl_damage_sum.pack(fill="x")
         self.lbl_total_damage = tk.Label(card, text="已确认 0 笔 · 待确认 0 笔",
                                          bg=PANEL, fg=DIM, font=tiny, anchor="w")
         self.lbl_total_damage.pack(fill="x", pady=(3, 0))
+        self.lbl_last_damage = tk.Label(card, text="最近有效伤害  —", bg=PANEL,
+            fg="#ffca9d", font=("Microsoft YaHei UI", 8, "bold", "italic"), anchor="w")
+        self.lbl_last_damage.pack(fill="x", pady=(7, 0))
+
+        resources = tk.Frame(root, bg=BG)
+        resources.pack(fill="x", padx=12, pady=(3, 5))
+        self.dp_meter = ResourceMeter(resources, "DP", "护盾", ("#4568ee", "#6ae1ff"))
+        self.dp_meter.pack(fill="x", pady=(0, 6))
+        self.hp_meter = ResourceMeter(resources, "HP", "生命", ("#ea587c", "#ffb07d"))
+        self.hp_meter.pack(fill="x")
 
         targets = tk.Frame(root, bg=BG)
-        targets.pack(fill="x", padx=12, pady=(6, 2))
-        tk.Label(targets, text="怪物数量", bg=BG, fg=FG, font=small).pack(side="left")
+        targets.pack(fill="x", padx=12, pady=(3, 8))
+        self.lbl_pool_hint = tk.Label(targets, text="", bg=BG, fg=DIM, font=tiny, anchor="w")
+        self.lbl_pool_hint.pack(side="left", fill="x", expand=True)
+        tk.Button(targets, text="战斗设置", command=self._open_battle_settings, bg=PANEL,
+            fg="#8ee8ff", relief="flat", font=small, padx=6).pack(side="right")
         self._enemy_var = tk.StringVar(value=str(self.ledger.enemies))
-        spin = tk.Spinbox(targets, from_=1, to=99, width=3, textvariable=self._enemy_var,
-            command=self._change_enemies, bg=PANEL, fg=FG, buttonbackground=PANEL,
-            insertbackground=FG, relief="flat", font=small)
-        spin.pack(side="right")
-        spin.bind("<Return>", self._change_enemies)
-        spin.bind("<FocusOut>", self._change_enemies)
         self.lbl_enemy_hint = tk.Label(root, text="平均 × 怪数；修改后重算本轮",
             bg=BG, fg=DIM, font=tiny, anchor="w")
-        self.lbl_enemy_hint.pack(fill="x", padx=12, pady=(0, 8))
 
         self.btn_toggle = tk.Button(root, text="开始", command=self.toggle, bg=ACCENT,
             fg="white", activebackground="#ff7ba1", relief="flat", font=bold, pady=5)
@@ -278,7 +293,16 @@ class Widget:
         self.txt_damage.tag_config("pending", foreground=WARN)
         self.txt_damage.tag_config("confirmed", foreground=FG)
 
-        self._details = tk.Frame(root, bg=BG)
+        self._details_window = tk.Toplevel(root)
+        self._details_window.withdraw()
+        self._details_window.title("HBR · 日志与诊断")
+        self._details_window.configure(bg=BG)
+        self._details_window.geometry("460x420")
+        self._details_window.minsize(360, 280)
+        self._details_window.transient(root)
+        self._details_window.protocol("WM_DELETE_WINDOW", self._hide_details)
+        self._details = tk.Frame(self._details_window, bg=BG)
+        self._details.pack(fill="both", expand=True, padx=12, pady=12)
         self._details_visible = False
         self.lbl_geom = tk.Label(self._details, text="", bg=BG, fg=DIM, font=tiny)
         self.lbl_geom.pack(fill="x")
@@ -300,16 +324,17 @@ class Widget:
         stats.columnconfigure(3, weight=1)
         self.txt_log = tk.Text(self._details, bg=PANEL, fg=DIM, font=("Consolas", 7),
             relief="flat", highlightthickness=0, wrap="word", height=4, state="disabled")
-        self.txt_log.pack(fill="x", pady=3)
+        self.txt_log.pack(fill="both", expand=True, pady=3)
         for tag, color in (("warn", WARN), ("err", ERR), ("ok", OK)):
             self.txt_log.tag_config(tag, foreground=color)
 
-        self.btn_details = tk.Button(root, text="▸ 日志与诊断", bg=BG, fg=DIM,
+        self.btn_details = tk.Button(root, text="日志与诊断 ↗", bg=BG, fg=DIM,
             relief="flat", font=tiny, command=self._toggle_details, anchor="w")
         self.btn_details.pack(fill="x", padx=12, pady=(6, 2))
         self.lbl_warn = tk.Label(root, text="", bg=BG, fg=WARN, font=tiny,
                                 wraplength=cfg.width - 24, justify="left", anchor="w")
         self.lbl_warn.pack(fill="x", padx=12, pady=(0, 8))
+        self._render_resources()
         self._toggle_preview()
         self._log("挂件已就绪；未知和残缺读数不计入累计伤害。")
         self.root.after(80, self._pump)
@@ -318,22 +343,29 @@ class Widget:
         self.root.after(250, self.start)
 
     def _toggle_details(self):
-        self._details_visible = not self._details_visible
         if self._details_visible:
-            self._details.pack(fill="x", padx=12, before=self.btn_details)
+            self._hide_details()
         else:
-            self._details.pack_forget()
-        self.btn_details.config(text="▾ 收起日志与诊断" if self._details_visible else "▸ 日志与诊断")
-        self._resize_panel()
+            self._details_visible = True
+            self._place_auxiliary(self._details_window, 460, 420)
+            self._details_window.deiconify()
+            self._details_window.lift()
+
+    def _hide_details(self):
+        self._details_visible = False
+        self._details_window.withdraw()
 
     def _desired_height(self):
-        height = self.cfg.height + (250 if self._details_visible else 0) + (140 if self.cfg.preview else 0)
+        height = self.cfg.height + (140 if self.cfg.preview else 0)
         return min(height, self.root.winfo_screenheight() - 80)
 
     def _resize_panel(self):
         self.root.update_idletasks()
         x, y, _, _ = self._physical_bounds()
         width, height = self.root.winfo_width(), self._desired_height()
+        if not self._want_running:
+            self.root.geometry(f"{width}x{height}")
+            return
         x = max(0, min(x, self.root.winfo_screenwidth() - width - 32))
         y = max(0, min(y, self.root.winfo_screenheight() - height - 60))
         self.root.geometry(f"{width}x{height}+{x}+{y}")
@@ -361,6 +393,83 @@ class Widget:
         self.lbl_enemy_hint.config(text="平均 × 怪数；修改后重算本轮", fg=DIM)
         self._render_damage()
         self._save_totals({"type": "enemy_count", "enemy_count": self.ledger.enemies})
+
+    def _open_battle_settings(self):
+        if self._settings_dialog is not None and self._settings_dialog.winfo_exists():
+            self._settings_dialog.lift()
+            return
+        dialog = self._settings_dialog = tk.Toplevel(self.root)
+        dialog.title("HBR · 战斗设置")
+        dialog.configure(bg=BG)
+        self._place_auxiliary(dialog, 380, 420)
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        body = tk.Frame(dialog, bg=BG, padx=20, pady=16)
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text="设置本轮初始值", font=self._bold, bg=BG, fg=FG,
+                 anchor="w").pack(fill="x", pady=(0, 12))
+        values = {}
+        for key, title, value, color in (("dp", "初始 DP", self.cfg.dp_max, "#6ae1ff"),
+                ("hp", "初始 HP", self.cfg.hp_max, "#ffb07d"),
+                ("enemies", "怪物数量", self.ledger.enemies, FG)):
+            row = tk.Frame(body, bg=BG)
+            row.pack(fill="x", pady=5)
+            tk.Label(row, text=title, font=self._small, bg=BG, fg=color, width=9,
+                     anchor="w").pack(side="left")
+            variable = tk.StringVar(value=f"{value:,}")
+            values[key] = variable
+            entry = tk.Entry(row, textvariable=variable, font=self._small, bg=PANEL,
+                fg=FG, insertbackground=FG, relief="flat", justify="right")
+            entry.pack(side="right", fill="x", expand=True, ipady=5)
+            if key == "dp":
+                entry.focus_set()
+                entry.selection_range(0, "end")
+        tk.Label(body, text="伤害先扣 DP，超出部分扣 HP。\n修改后重算本轮；新一轮恢复初始值。",
+            bg=BG, fg=DIM, font=self._small, justify="left", anchor="w").pack(fill="x", pady=(10, 2))
+        error = tk.Label(body, text="", bg=BG, fg=ERR, font=self._small, anchor="w")
+        error.pack(fill="x", pady=4)
+
+        def apply_values():
+            try:
+                self._set_battle_limits(values["dp"].get(), values["hp"].get(), values["enemies"].get())
+            except ValueError as exc:
+                error.config(text=str(exc))
+                return
+            dialog.destroy()
+            self._settings_dialog = None
+
+        tk.Button(body, text="应用并重算", command=apply_values, bg=ACCENT, fg=BG,
+            relief="flat", font=self._bold, pady=7).pack(fill="x")
+        dialog.bind("<Return>", lambda event: apply_values())
+        dialog.bind("<Escape>", lambda event: dialog.destroy())
+
+    def _place_auxiliary(self, window, width, height):
+        self.root.update_idletasks()
+        x, y, panel_width, _ = self._physical_bounds()
+        screen_width, screen_height = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        right = x + panel_width + 8
+        x = right if right + width + 32 <= screen_width else x - width - 32
+        x = max(0, min(x, screen_width - width - 32))
+        y = max(0, min(y, screen_height - height - 60))
+        window.geometry(f"{width}x{height}+{x}+{y}")
+
+    def _set_battle_limits(self, dp, hp, enemies):
+        dp, hp, enemies = pool_value(dp, "DP"), pool_value(hp, "HP"), enemy_count(enemies)
+        self.cfg.dp_max, self.cfg.hp_max, self.cfg.enemy_count = dp, hp, enemies
+        self.ledger.set_enemies(enemies)
+        self._enemy_var.set(str(enemies))
+        self._render_damage()
+        self._save_totals({"type": "battle_settings"})
+
+    def _render_resources(self):
+        state = resource_state(self.cfg.dp_max, self.cfg.hp_max,
+                               self.ledger.total, self.ledger.last_damage)
+        self.dp_meter.set_values(state.dp, state.dp_max, state.last_dp_loss)
+        self.hp_meter.set_values(state.hp, state.hp_max, state.last_hp_loss)
+        text = f"最近有效伤害  {state.last_damage:,}" if state.last_damage else "最近有效伤害  —"
+        self.lbl_last_damage.config(text=text)
+        self.lbl_pool_hint.config(text=f"{self.ledger.enemies} 怪 · DP → HP"
+            if state.dp_max or state.hp_max else "请设置初始值 →")
 
     # ------------------------------------------------------------ 线程回调
 
@@ -412,13 +521,16 @@ class Widget:
         self.lbl_damage_sum.config(text=total_text)
         pending = self.ledger.pending
         self.lbl_total_damage.config(text=f"已确认 {len(self.damage_readings) - pending} 笔 · 待确认 {pending} 笔")
+        self._render_resources()
 
     def _save_totals(self, event):
         monitor = getattr(self, "monitor", None)
         if monitor is None:
             return
         record = dict(event, enemy_count=self.ledger.enemies,
-                      total=self.ledger.total, time=time.time())
+                      total=self.ledger.total, time=time.time(),
+                      resources=asdict(resource_state(self.cfg.dp_max, self.cfg.hp_max,
+                          self.ledger.total, self.ledger.last_damage)))
         try:
             path = Path(self.cfg.outdir) / f"session-{monitor.run_id}-totals.jsonl"
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -441,6 +553,8 @@ class Widget:
                     self._log(item[1])
                 elif item[0] == "damage":
                     self._display_damage(item[1])
+                elif item[0] == "stopped":
+                    self._want_running = False
                 elif item[0] == "frame":
                     latest = item  # 只保留最新的一帧，避免刷新落后
         except queue.Empty:
@@ -506,7 +620,7 @@ class Widget:
     # ------------------------------------------------------------ 动作
 
     def toggle(self) -> None:
-        if self.thread is not None and self.thread.is_alive():
+        if self._want_running or (self.thread is not None and self.thread.is_alive()):
             self.stop()
         else:
             self.start()
@@ -530,6 +644,7 @@ class Widget:
         self.txt_damage.config(state="disabled")
         self.lbl_damage_sum.config(text="0")
         self.lbl_total_damage.config(text="已确认 0 笔 · 待确认 0 笔")
+        self._render_resources()
         self._want_running = True
         self._retries = 0
         self.btn_toggle.config(text="取消", bg="#3a3a4e")
@@ -605,7 +720,9 @@ class Widget:
 
     def _run_monitor(self) -> None:
         try:
-            self.monitor.run()
+            summary = self.monitor.run()
+            if summary and summary.get("stopped_by_user"):
+                self.queue.put(("stopped",))
         except Exception as exc:
             self.queue.put(("log", f"[出错] {type(exc).__name__}: {exc}"))
 
@@ -640,7 +757,7 @@ class Widget:
             return
 
         self.btn_toggle.config(text="开始", bg=ACCENT)
-        self.lbl_target.config(text="HBR · 已停止", fg=DIM)
+        self.lbl_target.config(text="已停止 · 可自由拖动", fg=DIM)
         self._log("已停止。")
         self._maybe_ask_keep()
 
@@ -845,6 +962,8 @@ class Widget:
 
     def _ensure_visible(self) -> bool:
         """确认挂件还在屏幕上、也没压在游戏上。有问题就纠正。返回是否做了纠正。"""
+        if not self._want_running:
+            return False
         x, y, width, height = self._physical_bounds()
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()

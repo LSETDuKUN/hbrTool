@@ -676,6 +676,7 @@ class Monitor:
         grabbed = 0
         failed = 0
         stopped_by_limit = False
+        stopped_by_user = False
 
         try:
             while True:
@@ -691,11 +692,13 @@ class Monitor:
 
                 # 停止热键 —— 控制台被最小化时按这个，不用去点任务栏
                 if stop_vk is not None and win32.key_down(stop_vk):
+                    stopped_by_user = True
                     self._say(f"\n按下 [{cfg.stop_hotkey_name}]，收工。")
                     break
 
                 # 外部（GUI）请求停止
                 if cfg.should_stop is not None and cfg.should_stop():
+                    stopped_by_user = True
                     self._say("\n收到停止请求，收工。")
                     break
 
@@ -796,6 +799,7 @@ class Monitor:
                     time.sleep(period - elapsed)
 
         except KeyboardInterrupt:
+            stopped_by_user = True
             self._say("\n收到 Ctrl+C，收工。")
         except Exception:
             # 出意外也要把控制台还回来，不能让它一直最小化着
@@ -817,6 +821,7 @@ class Monitor:
             "fps_actual": round(grabbed / total_time, 2) if total_time else 0.0,
             "outdir": str(cfg.outdir),
             "stopped_by_limit": stopped_by_limit,
+            "stopped_by_user": stopped_by_user,
         }
         self._say(
             "\n汇总: 存了 {saved} 帧 {by_trigger}，跳过 {skipped_duplicates} 张重复图，"

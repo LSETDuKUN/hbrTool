@@ -94,6 +94,11 @@ class ReviewRegressionTests(unittest.TestCase):
         widget.damage_readings = []
         from hbr_capture.damage_stats import DamageLedger
         widget.ledger = DamageLedger(enemies=2)
+        widget.cfg = SimpleNamespace(dp_max=300, hp_max=500)
+        widget.dp_meter = MagicMock()
+        widget.hp_meter = MagicMock()
+        widget.lbl_last_damage = MagicMock()
+        widget.lbl_pool_hint = MagicMock()
         widget.reading_sum = widget.total_damage = 0
         widget.txt_damage = MagicMock()
         widget.lbl_damage_sum = MagicMock()
@@ -107,6 +112,8 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertEqual(widget.reading_sum, 500)
         self.assertEqual(widget.total_damage, 500)
         widget.lbl_damage_sum.config.assert_called_with(text="500")
+        widget.dp_meter.set_values.assert_called_with(0, 300, 300)
+        widget.hp_meter.set_values.assert_called_with(300, 500, 200)
 
     def test_unknown_revision_is_counted_once(self):
         from hbr_capture.damage_stats import DamageLedger
