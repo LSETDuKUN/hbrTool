@@ -16,9 +16,9 @@ from PIL import Image
 
 from . import win32
 from .capture import Frame
-from .damage_events import ActionGate, EventTracker, OcrMailbox
+from .damage_events import EventTracker, OcrMailbox
 from .damage_stats import DamageLedger
-from hbr_recog.visibility import (BUTTON_ROI, DIGITS_ROI, TOTAL_ROI,
+from hbr_recog.visibility import (SEARCH_ROI, DIGITS_ROI, TOTAL_ROI,
                                   HudVisibility, normalize, viewport_box)
 
 
@@ -31,12 +31,13 @@ class OcrJob:
     rgb: np.ndarray
     roi: tuple
     visibility_score: float
+    pose: tuple | None = None
 
 
 class EventMonitor:
     def __init__(self, monitor, grabber):
         self.monitor, self.cfg, self.grabber = monitor, monitor.cfg, grabber
-        self.tracker, self.gate = EventTracker(), ActionGate()
+        self.tracker = EventTracker()
         self.ledger = DamageLedger()
         self.visibility = HudVisibility()
         self.mailbox, self.results = OcrMailbox(), queue.Queue()
@@ -49,6 +50,18 @@ class EventMonitor:
         self.audit = None
         self.worker = None
         self.worker_error = None
+        self.diagnostic_at = 0
+        self.diagnostic_count = 0
+
+    def diagnostic(self, rgb, roi, score, pose, now):
+        if now - self.diagnostic_at < 5 or self.diagnostic_count >= 60:
+            return
+        self.diagnostic_at = now
+        self.diagnostic_count += 1
+        dropped = self.mailbox.put(OcrJob(0, self.diagnostic_count, now,
+                           time.time(), rgb, roi, score, pose))
+        if dropped:
+            self.write('queue_drop', event_id=dropped.event_id, frame_id=dropped.frame_id)
 
     def write(self, kind, **values):
         self.audit.write(json.dumps(dict(type=kind, run=self.monitor.run_id, **values),
@@ -80,6 +93,11 @@ class EventMonitor:
                 job = self.mailbox.get()
                 if job is None:
                     return
+                if job.event_id == 0:
+                    name = f'session-{self.monitor.run_id}-diagnostic-{job.frame_id:03d}.png'
+                    Image.fromarray(job.rgb).save(self.cfg.outdir / name)
+                    self.results.put((job, None, dict(file=name, pose=job.pose)))
+                    continue
                 stem = f'session-{self.monitor.run_id}-ocr-{job.frame_id:07d}'
                 source = stem + '.png'
                 input_file, mask_file = stem + '-input.png', stem + '-mask.png'
@@ -106,8 +124,10 @@ class EventMonitor:
                 job, reading, evidence = self.results.get_nowait()
             except queue.Empty:
                 break
-            self.processed += 1
-            self.write('ocr', event_id=job.event_id, frame_id=job.frame_id,
+            diagnostic = job.event_id == 0
+            if not diagnostic:
+                self.processed += 1
+            self.write('diagnostic' if diagnostic else 'ocr', event_id=job.event_id, frame_id=job.frame_id,
                        timestamp=job.timestamp, captured_at=job.captured_at,
                        roi=job.roi, visibility_score=job.visibility_score,
                        parsed=reading, **evidence)
@@ -115,20 +135,23 @@ class EventMonitor:
             m = self.monitor
             with m._save_lock:
                 m.seq += 1
-                m.counts['ocr_sample'] = m.counts.get('ocr_sample', 0) + 1
-                record = dict(run=m.run_id, seq=m.seq, trigger='ocr_sample',
+                trigger = 'diagnostic' if diagnostic else 'ocr_sample'
+                m.counts[trigger] = m.counts.get(trigger, 0) + 1
+                record = dict(run=m.run_id, seq=m.seq, trigger=trigger,
                               file=evidence['file'], event_id=job.event_id,
                               frame_id=job.frame_id, timestamp=job.captured_at,
                               width=job.rgb.shape[1], height=job.rgb.shape[0],
-                              method='screendc-region', roi=job.roi)
+                              method='screendc-region', roi=job.roi, pose=job.pose)
                 with (self.cfg.outdir / 'index.jsonl').open('a', encoding='utf-8') as f:
                     f.write(json.dumps(record, ensure_ascii=False) + '\n')
+            if diagnostic:
+                continue
             event = self.tracker.result(job.event_id, job.frame_id, reading)
             self.publish(event)
 
-    def sample(self, rgb, roi, visible, score, now, wall):
+    def sample(self, rgb, roi, visible, score, now, wall, pose=None):
         self.frame_id += 1
-        self.ring.append((self.frame_id, now, wall, rgb, visible, score, roi))
+        self.ring.append((self.frame_id, now, wall, rgb, visible, score, roi, pose))
         while self.ring and now - self.ring[0][1] > 1:
             self.ring.popleft()
         if self.last_sample and now - self.last_sample > .12:
@@ -174,12 +197,13 @@ class EventMonitor:
             gray = cv2.cvtColor(item[3][y0:y1, x0:x1], cv2.COLOR_RGB2GRAY)
             return float(cv2.Laplacian(gray, cv2.CV_32F).var())
         chosen = max(candidates, key=clarity) if candidates else self.ring[-1]
-        frame_id, timestamp, captured_at, candidate_rgb, _, candidate_score, candidate_roi = chosen
-        job = OcrJob(event.event_id, frame_id, timestamp, captured_at, candidate_rgb, candidate_roi, candidate_score)
+        frame_id, timestamp, captured_at, candidate_rgb, _, candidate_score, candidate_roi, candidate_pose = chosen
+        job = OcrJob(event.event_id, frame_id, timestamp, captured_at, candidate_rgb, candidate_roi, candidate_score, candidate_pose)
         dropped = self.mailbox.put(job)
         if dropped:
             self.dropped += 1
-            self.tracker.events[dropped.event_id].dropped += 1
+            if dropped.event_id:
+                self.tracker.events[dropped.event_id].dropped += 1
             self.write('queue_drop', event_id=dropped.event_id, frame_id=dropped.frame_id)
         self.last_submit, self.last_rgb = now, rgb
         self.submitted += 1
@@ -190,14 +214,15 @@ class EventMonitor:
         self.audit = path.open('a', encoding='utf-8')
         self.worker = threading.Thread(target=self._work, name='hbr-event-ocr', daemon=True)
         self.worker.start()
-        self.write('config', version=1, active_fps=cfg.event_fps, idle_fps=8,
+        self.write('config', version=2, active_fps=cfg.event_fps, action_gate=False,
                    blank_frames=2, confirm_frames=2, buffer_seconds=1,
-                   queue_capacity=16, total_roi=TOTAL_ROI, digits_roi=DIGITS_ROI,
+                   queue_capacity=16, search_roi=SEARCH_ROI, total_roi=TOTAL_ROI, digits_roi=DIGITS_ROI,
                    warning='没有采到空白时无法可靠区分相邻同值事件；不根据数值变化拆分事件')
-        m._say('事件识别已启用：仅合计伤害；行动时区域采集，等待时暂停 OCR。')
+        m._say('事件识别已启用：开始行动按钮判定已禁用；可手动暂停 / 继续。')
         grabbed = failed = 0
         stopped_by_user = stopped_by_limit = False
         prev_key = False
+        paused = False
         next_interval = self.started + cfg.interval if cfg.interval else None
         try:
             while True:
@@ -212,27 +237,31 @@ class EventMonitor:
                 self.drain()
                 if self.worker_error:
                     raise RuntimeError(f'OCR 工作线程失败: {self.worker_error}') from self.worker_error
+                want_pause = bool(cfg.should_pause and cfg.should_pause())
+                if want_pause != paused:
+                    paused = want_pause
+                    self.write('manual_pause', paused=paused, timestamp=now)
+                    self.ring.clear()
+                    self.tracker.blanks = 0
+                    self.last_sample = 0
+                    self.last_submit = 0
+                    self.submitted = 0
+                    if self.tracker.current and 'manual_pause' not in self.tracker.current.uncertainties:
+                        self.tracker.current.uncertainties.append('manual_pause')
+                    m._say('已暂停采集，已有候选正在收尾；累计保留。' if paused else '已继续采集，沿用本轮事件与累计。')
+                if paused:
+                    # Stop and OCR completion checks above remain responsive.
+                    time.sleep(.05)
+                    continue
                 try:
                     info = self.grabber.refresh()
                     size, self.hwnd = info.client_size, info.hwnd
-                    button, _ = self.capture(BUTTON_ROI, size)
-                    button_visible, button_score = self.visibility.check(button, 'button')
-                    switched = self.gate.observe(button_visible)
-                    if switched:
-                        self.write('phase', idle=self.gate.idle, timestamp=now,
-                                   button_score=button_score)
-                        m._say('等待指令 · OCR 已暂停' if self.gate.idle else '行动中 · 正在采集合计伤害')
-                        if self.gate.idle:
-                            event = self.tracker.close(now, 'action_button_returned')
-                            if event:
-                                self.publish(event)
-                        self.last_sample = 0
-                    preview_rgb = button
-                    if not self.gate.idle:
-                        rgb, roi = self.capture(TOTAL_ROI, size)
-                        visible, score = self.visibility.check(rgb, 'total')
-                        self.sample(rgb, roi, visible, score, time.monotonic(), time.time())
-                        preview_rgb = rgb
+                    search_rgb, roi = self.capture(SEARCH_ROI, size)
+                    rgb, visible, score, pose = self.visibility.prepare_total(search_rgb)
+                    if visible is not True:
+                        self.diagnostic(search_rgb, roi, score, pose, now)
+                    self.sample(rgb, roi, visible, score, time.monotonic(), time.time(), pose)
+                    preview_rgb = rgb
                     grabbed += 1
                     failed = 0
                 except (OSError, ValueError, LookupError) as exc:
@@ -259,10 +288,10 @@ class EventMonitor:
                                   'screendc-region', 1.0)
                     cfg.on_frame(frame, dict(grabbed=grabbed, saved=m.seq,
                         damage_hits=m.damage_hits, elapsed=now - self.started,
-                        method='区域采集', phase='等待指令' if self.gate.idle else '行动识别',
+                        method='区域采集', phase='正在识别',
                         queue_dropped=self.dropped, failed=failed, broken=False))
                     self.last_preview = now
-                period = 1 / (8 if self.gate.idle else max(1, cfg.event_fps))
+                period = 1 / max(1, cfg.event_fps)
                 remaining = period - (time.monotonic() - now)
                 if remaining > 0:
                     time.sleep(remaining)

@@ -11,6 +11,7 @@ import numpy as np
 from PIL import Image
 
 TOTAL_ROI = (1220, 470, 1990, 665)
+SEARCH_ROI = (900, 400, 2048, 800)
 BUTTON_ROI = (1765, 910, 1980, 990)
 DIGITS_ROI = (150, 60, 760, 185)  # relative to TOTAL_ROI
 
@@ -32,9 +33,17 @@ class HudVisibility:
     def __init__(self):
         root = Path(__file__).with_name('visual_refs')
         self.refs = {}
+        self.scaled_total = []
+        self.pose = (320., 70., 1.)
+        self.last_search = 0.
         for name, filename in [('total', 'total-label.png'), ('button', 'action-button.png')]:
             with Image.open(root / filename) as image:
-                self.refs[name] = cv2.Canny(np.array(image.convert('RGB')), 80, 160)
+                rgb = np.array(image.convert('RGB'))
+                self.refs[name] = cv2.Canny(rgb, 80, 160)
+                if name == 'total':
+                    self.scaled_total = [(scale, cv2.Canny(cv2.resize(rgb, None,
+                        fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR), 80, 160))
+                        for scale in (.65, .8, 1., 1.2, 1.5)]
 
     def check(self, rgb, name):
         region = rgb[10:75, 40:250] if name == 'total' else rgb
@@ -43,5 +52,43 @@ class HudVisibility:
         # Full-screen flashes/black-outs are not evidence of a new event.
         gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
         flash = float(np.mean(gray > 245)) > .8 or float(np.std(gray)) < 4
-        visible = True if score >= .50 else (None if score >= .22 or flash else False)
+        visible = True if score >= .48 else (None if score >= .22 or flash else False)
         return visible, score
+
+    def prepare_total(self, rgb):
+        """Locate the label inside a wider HUD band and align the numeric input.
+
+        The old fixed ROI is the initial pose. Reacquire periodically at several
+        label sizes, so a layout/scale change does not silently disable all OCR.
+        Visibility is still entirely visual, never inferred from OCR success.
+        """
+        import time
+        def aligned(pose):
+            x, y, scale = pose
+            matrix = np.array([[1/scale, 0, -x/scale], [0, 1/scale, -y/scale]], np.float32)
+            return cv2.warpAffine(rgb, matrix, (770, 195))
+        canonical = aligned(self.pose)
+        visible, score = self.check(canonical, 'total')
+        now = time.monotonic()
+        if visible is not True and now - self.last_search >= .1:
+            self.last_search = now
+            edge = cv2.Canny(rgb, 80, 160)
+            best = (score, None)
+            for scale, template in self.scaled_total:
+                _, candidate, _, location = cv2.minMaxLoc(cv2.matchTemplate(
+                    edge, template, cv2.TM_CCOEFF_NORMED))
+                pose = (location[0]-60*scale, location[1]-22*scale, scale)
+                if candidate >= .30:
+                    # Recheck after alignment: font rasterization at a smaller
+                    # size changes Canny pixels, while normalized text agrees.
+                    _, verified = self.check(aligned(pose), 'total')
+                    candidate = max(candidate, verified)
+                if candidate > best[0]:
+                    best = (candidate, pose)
+            if best[1] is not None and best[0] >= .48:
+                self.pose = best[1]
+                canonical = aligned(self.pose)
+                visible, score = True, float(best[0])
+            elif best[0] >= .22:
+                visible, score = None, float(best[0])
+        return canonical, visible, score, self.pose

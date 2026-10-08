@@ -116,6 +116,7 @@ def _run_sidecars(outdir, run_id: str) -> List[Path]:
     # Validate before globbing; audit artifacts use flat, run-scoped filenames.
     _safe_child(outdir, run_id)
     candidates.extend(outdir.glob(f'session-{run_id}-ocr-*.png'))
+    candidates.extend(outdir.glob(f'session-{run_id}-diagnostic-*.png'))
     return [p for p in candidates if p.exists()]
 
 

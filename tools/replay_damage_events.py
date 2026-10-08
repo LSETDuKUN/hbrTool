@@ -13,7 +13,7 @@ import numpy as np
 from PIL import Image
 
 from hbr_recog.damage import DamageReader
-from hbr_recog.visibility import (BUTTON_ROI, DIGITS_ROI, TOTAL_ROI,
+from hbr_recog.visibility import (BUTTON_ROI, DIGITS_ROI, TOTAL_ROI, SEARCH_ROI,
                                   HudVisibility, normalize, viewport_box)
 
 
@@ -26,13 +26,17 @@ def replay(root):
             rgb = np.array(image.convert('RGB'))
         start = time.perf_counter()
         regions = {}
-        if record.get('trigger') == 'ocr_sample':
+        if record.get('trigger') == 'diagnostic':
+            prepared, visible, score, pose = detector.prepare_total(normalize(rgb, SEARCH_ROI))
+            regions['total'] = prepared
+        elif record.get('trigger') == 'ocr_sample':
             regions['total'] = normalize(rgb, TOTAL_ROI)
         else:
             for name, box in [('total', TOTAL_ROI), ('button', BUTTON_ROI)]:
                 x, y, X, Y = viewport_box(box, (rgb.shape[1], rgb.shape[0]))
                 regions[name] = normalize(rgb[y:Y, x:X], box)
-        visible, score = detector.check(regions['total'], 'total')
+        if record.get('trigger') != 'diagnostic':
+            visible, score = detector.check(regions['total'], 'total')
         button, button_score = (detector.check(regions['button'], 'button')
                                 if 'button' in regions else (None, None))
         detection_ms = (time.perf_counter() - start) * 1000

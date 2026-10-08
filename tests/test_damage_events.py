@@ -201,6 +201,34 @@ class ActualSessionTests(unittest.TestCase):
 
 
 class PortableCropTests(unittest.TestCase):
+    def test_displaced_label_reacquires_and_aligns_digits(self):
+        from hbr_recog.visibility import HudVisibility
+        root=Path(__file__).parent/'fixtures/damage_events'
+        with Image.open(root/'total-351.png') as image:
+            canonical=np.array(image.convert('RGB'))
+        search=np.zeros((400,1148,3),np.uint8)
+        search[130:325,180:950]=canonical
+        detector=HudVisibility()
+        aligned,visible,score,pose=detector.prepare_total(search)
+        self.assertIs(visible,True)
+        self.assertAlmostEqual(pose[0],180,delta=3)
+        self.assertAlmostEqual(pose[1],130,delta=3)
+        from hbr_recog.damage import DamageReader
+        found=DamageReader(min_run=1,label_store=False).read_total_band(aligned[60:185,150:760])
+        self.assertEqual([r.text for r in found],['420483989'])
+
+    def test_smaller_label_is_detected_in_wider_band(self):
+        import cv2
+        from hbr_recog.visibility import HudVisibility
+        with Image.open(Path(__file__).parent/'fixtures/damage_events/total-351.png') as image:
+            small=cv2.resize(np.array(image.convert('RGB')),None,fx=.8,fy=.8)
+        search=np.zeros((400,1148,3),np.uint8)
+        search[150:150+small.shape[0],100:100+small.shape[1]]=small
+        detector=HudVisibility()
+        _,visible,_,pose=detector.prepare_total(search)
+        self.assertIs(visible,True)
+        self.assertAlmostEqual(pose[2],.8)
+
     def test_single_digit_and_partial_then_full(self):
         from hbr_recog.damage import DamageReader
         from hbr_recog.visibility import DIGITS_ROI, HudVisibility, TOTAL_ROI, normalize
@@ -219,11 +247,50 @@ class PortableCropTests(unittest.TestCase):
                 small = cv2.resize(rgb, (round(rgb.shape[1]*width/2048), round(rgb.shape[0]*width/2048)))
                 self.assertTrue(detector.check(normalize(small, TOTAL_ROI), 'total')[0], (seq, width))
         with Image.open(root / 'total-97.png') as image:
-            self.assertFalse(detector.check(np.array(image.convert('RGB')), 'total')[0])
+            negative=np.array(image.convert('RGB'))
+            self.assertFalse(detector.check(negative, 'total')[0])
+            search=np.zeros((400,1148,3),np.uint8)
+            search[70:265,320:1090]=negative
+            self.assertIsNot(HudVisibility().prepare_total(search)[1],True)
 
 
 class ProducerTests(unittest.TestCase):
-    def test_idle_avoids_ocr_and_capture_continues_while_worker_is_slow(self):
+    def test_stop_while_paused_exits_without_capturing(self):
+        from hbr_capture.event_monitor import EventMonitor
+        from hbr_capture.monitor import Monitor, MonitorConfig
+        with tempfile.TemporaryDirectory() as directory:
+            start=time.monotonic()
+            cfg=MonitorConfig(outdir=Path(directory),quiet=True,should_pause=lambda:True,
+                              should_stop=lambda:time.monotonic()-start>.1)
+            pipeline=EventMonitor(Monitor(cfg),None)
+            summary=pipeline.run()
+            self.assertTrue(summary['stopped_by_user'])
+            self.assertEqual(summary['grabbed'],0)
+
+    def test_widget_resume_keeps_ledger_and_does_not_start_new_run(self):
+        from hbr_capture.widget import Widget
+        from unittest.mock import Mock
+        widget=Widget.__new__(Widget)
+        widget._want_running=True
+        widget._pause=threading.Event()
+        widget.thread=Mock()
+        widget.thread.is_alive.return_value=True
+        widget.btn_pause=Mock()
+        widget.lbl_target=Mock()
+        widget._log=Mock()
+        widget._connect=Mock()
+        widget.ledger=DamageLedger()
+        widget.ledger.add(dict(event_id=1,readings=[dict(value=100,label='合计')]))
+        ledger=widget.ledger
+        widget.toggle_pause()
+        self.assertTrue(widget._pause.is_set())
+        widget.toggle_pause()
+        self.assertFalse(widget._pause.is_set())
+        self.assertIs(widget.ledger,ledger)
+        self.assertEqual(widget.ledger.total,100)
+        widget._connect.assert_not_called()
+
+    def test_action_button_is_never_sampled_or_used(self):
         from hbr_capture.event_monitor import EventMonitor
         from hbr_capture.monitor import Monitor, MonitorConfig
         with tempfile.TemporaryDirectory() as directory:
@@ -233,15 +300,16 @@ class ProducerTests(unittest.TestCase):
             pipeline = EventMonitor(monitor, grabber)
             captures = []
             def capture(box, size):
+                from hbr_recog.visibility import SEARCH_ROI
+                self.assertEqual(box,SEARCH_ROI)
                 captures.append(time.monotonic())
                 return np.zeros((box[3] - box[1], box[2] - box[0], 3), np.uint8), box
             pipeline.capture = capture
-            pipeline.visibility.check = lambda rgb, name: (True, .99)
-            # Button is already visible -> wait mode starts before the fourth tick.
+            pipeline.visibility.prepare_total = lambda rgb: (rgb[:195, :770], True, .99, (320,70,1))
             summary = pipeline.run()
-            self.assertTrue(pipeline.gate.idle)
-            self.assertLessEqual(summary['grabbed'], 7)
-            self.assertLessEqual(pipeline.processed, 2)
+            from hbr_recog.visibility import SEARCH_ROI
+            self.assertGreaterEqual(summary['grabbed'], 8)
+            self.assertEqual(pipeline.processed, 3)
             self.assertTrue(summary['stopped_by_limit'])
 
     def test_slow_worker_does_not_block_region_sampling(self):
@@ -253,7 +321,7 @@ class ProducerTests(unittest.TestCase):
             grabber = SimpleNamespace(refresh=lambda: SimpleNamespace(client_size=(2048, 1152), hwnd=1))
             pipeline = EventMonitor(monitor, grabber)
             pipeline.capture = lambda box, size: (np.zeros((box[3]-box[1], box[2]-box[0], 3), np.uint8), box)
-            pipeline.visibility.check = lambda rgb, name: (name == 'total', .99)
+            pipeline.visibility.prepare_total = lambda rgb: (rgb[:195, :770], True, .99, (320,70,1))
             done = []
             def slow():
                 while (job := pipeline.mailbox.get()) is not None:
@@ -264,6 +332,55 @@ class ProducerTests(unittest.TestCase):
             self.assertGreaterEqual(summary['grabbed'], 6)
             self.assertGreaterEqual(len(done), 2)
             self.assertIsNotNone(pipeline.tracker.events[1].ended)
+
+    def test_pause_resume_preserves_event_total_and_stops_capture(self):
+        from hbr_capture.event_monitor import EventMonitor
+        from hbr_capture.monitor import Monitor, MonitorConfig
+        from hbr_recog.visibility import SEARCH_ROI
+        with tempfile.TemporaryDirectory() as directory:
+            start = time.monotonic()
+            paused = lambda: .12 <= time.monotonic()-start < .35
+            ledger = DamageLedger()
+            cfg = MonitorConfig(outdir=Path(directory), duration=.65, quiet=True,
+                                should_pause=paused, on_damage=ledger.add)
+            monitor = Monitor(cfg)
+            grabber = SimpleNamespace(refresh=lambda: SimpleNamespace(client_size=(2048,1152), hwnd=1))
+            pipeline = EventMonitor(monitor, grabber)
+            with Image.open(Path(__file__).parent/'fixtures/damage_events/total-351.png') as image:
+                canonical = np.array(image.convert('RGB'))
+            captures = []
+            def capture(box, size):
+                self.assertEqual(box, SEARCH_ROI)
+                self.assertFalse(paused())
+                captures.append(time.monotonic()-start)
+                return np.zeros((400,1148,3),np.uint8), box
+            pipeline.capture = capture
+            pipeline.visibility.prepare_total = lambda rgb: (canonical,True,.99,(320,70,1))
+            pipeline.run()
+            self.assertTrue(any(t<.12 for t in captures))
+            self.assertTrue(any(t>=.35 for t in captures))
+            self.assertEqual(len(pipeline.tracker.events),1)
+            self.assertEqual(ledger.total,420483989)
+            self.assertIn('manual_pause',pipeline.tracker.events[1].uncertainties)
+
+    def test_no_trigger_still_saves_diagnostic_evidence(self):
+        from hbr_capture.event_monitor import EventMonitor
+        from hbr_capture.monitor import Monitor, MonitorConfig
+        from hbr_capture.session import archive_run
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cfg = MonitorConfig(outdir=root/'frames', duration=.12, quiet=True)
+            cfg.outdir.mkdir()
+            monitor = Monitor(cfg)
+            grabber = SimpleNamespace(refresh=lambda: SimpleNamespace(client_size=(2048,1152),hwnd=1))
+            pipeline = EventMonitor(monitor,grabber)
+            pipeline.capture=lambda box,size:(np.zeros((400,1148,3),np.uint8),box)
+            pipeline.visibility.prepare_total=lambda rgb:(rgb[:195,:770],False,.1,(320,70,1))
+            summary=pipeline.run()
+            self.assertEqual(pipeline.processed,0)
+            self.assertEqual(summary['by_trigger']['diagnostic'],1)
+            dest=archive_run(cfg.outdir,monitor.run_id,root/'results')
+            self.assertEqual(len(list(dest.glob('*-diagnostic-*.png'))),1)
 
 
 if __name__ == '__main__':

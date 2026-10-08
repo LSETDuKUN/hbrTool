@@ -53,6 +53,7 @@ class MonitorConfig:
     on_damage: Optional[Callable] = None
     # 外部（GUI）请求停止。返回 True 就收工。
     should_stop: Optional[Callable] = None
+    should_pause: Optional[Callable] = None
 
     # ---- 内容触发：认出伤害数字就立刻存 ----
     # settle 的哲学是"等画面稳定"，而伤害数字恰好出现在动画过程中 ——
@@ -715,6 +716,10 @@ class Monitor:
                     stopped_by_user = True
                     self._say("\n收到停止请求，收工。")
                     break
+
+                if cfg.should_pause and cfg.should_pause():
+                    time.sleep(.05)
+                    continue
 
                 try:
                     frame = grabber.grab()
