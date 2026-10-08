@@ -509,7 +509,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--enemy-count", type=int, default=1, help="怪物数量（平均伤害乘数）")
     p.add_argument("--dp", type=int, default=0, help="量表初始 DP")
     p.add_argument("--hp", type=int, default=0, help="量表初始 HP")
-    p.add_argument("--fps", type=float, default=15.0)
+    p.add_argument("--fps", type=float, default=30.0)
     p.add_argument("--method", default="auto",
                    choices=["auto", "printwindow", "screendc", "bitblt"])
     p.add_argument("--hotkey", default="F9", help="抓当前帧热键（默认 F9）")

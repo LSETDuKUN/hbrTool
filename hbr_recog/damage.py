@@ -275,6 +275,10 @@ class DamageReader:
             min_row_pixels=self.min_row_pixels,
             scale=self.scale,
         )
+        # Geometry before digit classification: an OCR failure is not a blank.
+        self.visual_boxes = [(min(g.x0 for g in gs), y0,
+                              max(g.x1 for g in gs), y1)
+                             for y0, y1, gs in lines]
 
         results: List[DamageRead] = []
         for _, _, glyphs in lines:

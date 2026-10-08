@@ -49,14 +49,15 @@ class OcrLabelReader:
         self.engine = RapidOCR()
         self.upscale = upscale
 
-    def _recognise(self, region: np.ndarray):
+    def _recognise(self, region: np.ndarray, upscale=None):
         """对一小块图跑识别，返回 [(文本, 置信度), ...]。"""
         from PIL import Image
 
         image = Image.fromarray(region)
-        if self.upscale > 1:
+        upscale = self.upscale if upscale is None else upscale
+        if upscale > 1:
             image = image.resize(
-                (image.width * self.upscale, image.height * self.upscale),
+                (image.width * upscale, image.height * upscale),
                 Image.LANCZOS,
             )
         # RapidOCR 走的是 OpenCV 那套，期望 BGR

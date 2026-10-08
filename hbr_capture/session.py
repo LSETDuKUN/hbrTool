@@ -98,6 +98,10 @@ def _run_files(outdir: Path, run_id: str, records: List[dict]) -> List[Path]:
         side = _sidecar(path)
         if side is not None:
             paths.append(_safe_child(outdir, side.name))
+        for name in record.get("ocr_inputs", []):
+            input_path = _safe_child(outdir, name)
+            if input_path.is_file():
+                paths.append(input_path)
     paths.extend(_run_sidecars(outdir, run_id))
     for path in paths:
         _safe_child(outdir, path.name)

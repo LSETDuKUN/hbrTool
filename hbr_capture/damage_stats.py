@@ -64,14 +64,15 @@ class DamageLedger:
         readings = [dict(r) for r in event["readings"]]
         old = self.events.get(key)
         # Later OCR failures must not replace a previously confirmed value.
-        if old is not None:
+        if old is not None and not event.get("replace_group"):
             readings = [previous if self.amount(previous) is not None
                         and self.amount(current) is None else current
                         for previous, current in zip(old, readings)] if len(old) == len(readings) else old
         self.events[key] = readings
 
     def amount(self, reading):
-        if reading.get("unresolved", 0) or reading.get("label") not in ("合计", "平均"):
+        if (reading.get("confirmed") is False or reading.get("unresolved", 0)
+                or reading.get("label") not in ("合计", "平均")):
             return None
         return reading["value"] * (self.enemies if reading["label"] == "平均" else 1)
 

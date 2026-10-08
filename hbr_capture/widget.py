@@ -82,7 +82,7 @@ class WidgetConfig:
     #: 留出窗口边框余量，适配窗口模式下游戏右侧的窄空隙。
     width: int = 250
     height: int = 760
-    fps: float = 15.0
+    fps: float = 30.0
     method: str = "auto"
     hotkey_name: Optional[str] = "F9"
     stop_hotkey_name: Optional[str] = "F10"
@@ -170,6 +170,7 @@ class Widget:
         self.thread: Optional[threading.Thread] = None
         self.monitor: Optional[Monitor] = None
         self._stop = threading.Event()
+        self._pause = threading.Event()
         self._photo = None
         self._overlap = False
         self._want_running = False
@@ -228,6 +229,7 @@ class Widget:
         menu.add_command(label="星屑资料室 · 角色 / 风格 / 技能", command=self._open_library)
         menu.add_separator()
         menu.add_command(label="抓取当前帧  F9", command=self.snap)
+        menu.add_command(label="暂停 / 继续当前会话", command=self.toggle_pause)
         menu.add_command(label="窗口归位", command=self.reposition)
         menu.add_command(label="打开帧目录", command=self.open_dir)
         menu.add_separator()
@@ -272,9 +274,16 @@ class Widget:
         self.lbl_enemy_hint = tk.Label(root, text="平均 × 怪数；修改后重算本轮",
             bg=BG, fg=DIM, font=tiny, anchor="w")
 
-        self.btn_toggle = RoundedButton(root, text="开始", command=self.toggle, bg=ACCENT,
+        controls = tk.Frame(root, bg=BG)
+        controls.pack(fill="x", padx=12, pady=(0, 8))
+        self.btn_toggle = RoundedButton(controls, text="开始", command=self.toggle, bg=ACCENT,
             fg=BG, activebackground="#ffb9d7", relief="flat", font=bold, pady=5)
-        self.btn_toggle.pack(fill="x", padx=12, pady=(0, 8))
+        self.btn_toggle.pack(side="left", fill="x", expand=True)
+        self.btn_pause = RoundedButton(controls, text="暂停", command=self.toggle_pause,
+                                       bg="#665879", fg=FG, font=bold)
+        self.btn_toggle.config(width=120)
+        self.btn_pause.config(width=68)
+        self.btn_pause.pack(side="right", padx=(6, 0))
         self.lbl_preview = tk.Label(root, bg=PANEL, bd=0)
         footer = tk.Frame(root, bg=BG)
         footer.pack(side="bottom", fill="x", padx=12, pady=(5, 8))
@@ -282,7 +291,7 @@ class Widget:
         self._content.pack(fill="both", expand=True, padx=12)
         tk.Label(self._content, text="伤害明细", bg=BG, fg=FG, font=bold,
                  anchor="w").pack(fill="x", pady=(0, 5))
-        tk.Label(self._content, text="未知 / 残缺不入账", bg=BG, fg=DIM,
+        tk.Label(self._content, text="未知 / 残缺 / 待确认不入账", bg=BG, fg=DIM,
                  font=tiny, anchor="w").pack(fill="x", pady=(0, 5))
         damage_wrap = tk.Frame(self._content, bg=PANEL)
         damage_wrap.pack(fill="both", expand=True)
@@ -510,7 +519,8 @@ class Widget:
             value, label = reading["value"], reading["label"]
             amount = self.ledger.amount(reading)
             if amount is None:
-                reason = "残缺" if reading.get("unresolved", 0) else "未知"
+                reason = ("待确认" if reading.get("confirmed") is False else
+                          "残缺" if reading.get("unresolved", 0) else "未知")
                 line = f"{number:02d}  [{reason}] {reading.get('text', value)}\n     未计入\n"
                 tag = "pending"
             elif label == "平均":
@@ -586,7 +596,8 @@ class Widget:
         self.root.after(80, self._pump)
 
     def _update_stats(self, stats: dict) -> None:
-        self.lbl_target.config(text="HBR · 画面异常" if stats.get("broken") else "HBR · 识别中",
+        self.lbl_target.config(text="已暂停 · 保留统计" if self._pause.is_set() else
+                               "HBR · 画面异常" if stats.get("broken") else "HBR · 识别中",
                                fg=WARN if stats.get("broken") else OK)
         s = self._stat_labels
         s["method"].config(text=str(stats.get("method", "-")))
@@ -639,6 +650,21 @@ class Widget:
         else:
             self.start()
 
+    def toggle_pause(self):
+        if not self._want_running:
+            return
+        if self._pause.is_set():
+            self._pause.clear()
+            self.btn_pause.config(text="暂停")
+            self.lbl_target.config(text="HBR · 监视中", fg=FG)
+            if self.thread is None or not self.thread.is_alive():
+                self._connect()
+        else:
+            self._pause.set()
+            self.btn_pause.config(text="继续")
+            self.lbl_target.config(text="已暂停 · 保留统计", fg=WARN)
+        self._log("已暂停：思考期间请使用此状态。" if self._pause.is_set() else "继续之前的会话。")
+
     def start(self) -> None:
         """开始。窗口还没开也没关系 —— 会一直重试到游戏出现。"""
         if self.thread is not None and self.thread.is_alive():
@@ -660,11 +686,15 @@ class Widget:
         self.lbl_total_damage.config(text="已确认 0 笔 · 待确认 0 笔")
         self._render_resources()
         self._want_running = True
+        self._pause.clear()
+        self.btn_pause.config(text="暂停")
         self._retries = 0
         self.btn_toggle.config(text="取消", bg="#665879", fg=FG)
         self._connect()
 
     def _connect(self) -> None:
+        if self._pause.is_set() or (self.thread is not None and self.thread.is_alive()):
+            return
         if not self._want_running:
             self._on_thread_finished()
             return
@@ -721,6 +751,7 @@ class Widget:
             on_log=self._on_log_thread,
             on_damage=self._on_damage_thread,
             should_stop=self._should_stop_thread,
+            should_pause=self._pause.is_set,
             damage_trigger=self.cfg.damage_trigger,
             damage_recheck=self.cfg.damage_recheck,
             damage_gap_seconds=self.cfg.damage_gap_seconds,
@@ -742,6 +773,8 @@ class Widget:
 
     def stop(self) -> None:
         self._want_running = False
+        self._pause.clear()
+        self.btn_pause.config(text="暂停")
         self._stop.set()
         if self.thread is not None and self.thread.is_alive():
             self._log("已请求停止，等待线程收尾...")
@@ -756,6 +789,8 @@ class Widget:
         # 之前的写法是直接停住，表现就是"挂件总是丢失"：
         # 游戏窗口最小化一会儿、或者被遮挡触发中止，挂件就再也不干活了。
         if self._want_running:
+            if self._pause.is_set():
+                return
             # 跑了足够久才算"这次连接是好的"，把退避计数清零
             if self._monitor_started_at and time.time() - self._monitor_started_at > 30:
                 self._restarts = 0
@@ -976,7 +1011,7 @@ class Widget:
 
     def _ensure_visible(self) -> bool:
         """确认挂件还在屏幕上、也没压在游戏上。有问题就纠正。返回是否做了纠正。"""
-        if not self._want_running:
+        if not self._want_running or self._pause.is_set():
             return False
         x, y, width, height = self._physical_bounds()
         screen_w = self.root.winfo_screenwidth()

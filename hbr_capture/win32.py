@@ -616,9 +616,13 @@ def occluded_sample(hwnd: int, samples: int = 5) -> float:
     hidden = 0
     for x, y in points:
         top_window = user32.WindowFromPoint(wintypes.POINT(x, y))
-        if int(top_window) != int(hwnd):
+        if int(top_window) != int(hwnd) and not user32.IsChild(hwnd, top_window):
             hidden += 1
     return hidden / len(points) if points else 1.0
+
+
+user32.IsChild.argtypes = [wintypes.HWND, wintypes.HWND]
+user32.IsChild.restype = wintypes.BOOL
 
 
 def occluding_windows(hwnd: int, grid: int = 6) -> List[dict]:
@@ -647,7 +651,7 @@ def occluding_windows(hwnd: int, grid: int = 6) -> List[dict]:
 
     results = []
     for key, hits in sorted(counts.items(), key=lambda kv: -kv[1]):
-        is_self = key == int(hwnd)
+        is_self = key == int(hwnd) or bool(user32.IsChild(hwnd, key))
         entry = {
             "hwnd": key,
             "fraction": hits / total if total else 0.0,

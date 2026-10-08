@@ -53,6 +53,7 @@ class MonitorConfig:
     on_damage: Optional[Callable] = None
     # 外部（GUI）请求停止。返回 True 就收工。
     should_stop: Optional[Callable] = None
+    should_pause: Optional[Callable] = None
 
     # ---- 内容触发：认出伤害数字就立刻存 ----
     # settle 的哲学是"等画面稳定"，而伤害数字恰好出现在动画过程中 ——
@@ -273,6 +274,7 @@ class Monitor:
                     "method_requested": cfg.method,
                     "method_used": method_used,
                     "fps": cfg.fps,
+                    "damage_pipeline": "broad-band-worker-v1" if cfg.damage_trigger else None,
                     "hotkey": cfg.hotkey_name,
                     "on_change": cfg.on_change,
                     "settle": cfg.settle,
@@ -288,7 +290,8 @@ class Monitor:
             encoding="utf-8",
         )
 
-    def _save(self, frame: Frame, trigger: str, diff: float, dedup: bool = False) -> bool:
+    def _save(self, frame: Frame, trigger: str, diff: float, dedup: bool = False,
+              damage_event=None, ocr_images=None) -> bool:
         """存一帧。dedup=True 时，如果和上一张存过的帧完全一样就跳过。
 
         返回是否真的落了盘。热键触发永远不跳过 —— 你按了就是想要这一帧。
@@ -333,7 +336,19 @@ class Monitor:
                 "bytes": size,
                 "broken": not frame.ok,
             }
-            if trigger == "damage":
+            if damage_event is not None:
+                record["damage"] = damage_event["readings"]
+                record["damage_event_id"] = damage_event["event_id"]
+                record["update"] = damage_event.get("update", False)
+                record["recognition"] = damage_event.get("recognition", [])
+                record["ocr_inputs"] = []
+                if ocr_images:
+                    from PIL import Image
+                    for i, rgb in enumerate(ocr_images):
+                        input_name = f"{self.seq:06d}-ocr-{i}.png"
+                        Image.fromarray(rgb).save(self.cfg.outdir / input_name)
+                        record["ocr_inputs"].append(input_name)
+            elif trigger == "damage":
                 record["damage"] = self._confirmed_readings
                 record["damage_event_id"] = self._event_serial
             with (self.cfg.outdir / "index.jsonl").open("a", encoding="utf-8") as handle:
@@ -677,8 +692,15 @@ class Monitor:
         failed = 0
         stopped_by_limit = False
         stopped_by_user = False
+        live_damage = None
+        paused = False
+        failed_run = False
 
         try:
+            if cfg.damage_trigger:
+                from .live_damage import LiveDamage
+                live_damage = LiveDamage(self)
+                self._say("宽区域数字采样已启用；标签识别与存图在后台处理，无行动按钮门控。")
             while True:
                 loop_start = time.time()
                 if deadline and loop_start >= deadline:
@@ -701,6 +723,19 @@ class Monitor:
                     stopped_by_user = True
                     self._say("\n收到停止请求，收工。")
                     break
+
+                if cfg.should_pause is not None and cfg.should_pause():
+                    if not paused:
+                        paused = True
+                        if live_damage:
+                            live_damage.pause()
+                        self._say("已暂停采集，保留当前会话；后台收尾已采集的读数。")
+                    time.sleep(.1)
+                    continue
+                if paused:
+                    paused = False
+                    prev = None
+                    self._say("继续当前会话。")
 
                 try:
                     frame = grabber.grab()
@@ -731,7 +766,7 @@ class Monitor:
 
                 # ---- 触发 0: 内容触发（认出伤害数字就立刻存）
                 if cfg.damage_trigger and grabbed % max(1, cfg.damage_recheck) == 0:
-                    self._check_damage(frame, diff)
+                    live_damage.enqueue(frame, diff)
 
                 # ---- 触发 1: 热键
                 if hotkey_vk is not None:
@@ -803,11 +838,16 @@ class Monitor:
             self._say("\n收到 Ctrl+C，收工。")
         except Exception:
             # 出意外也要把控制台还回来，不能让它一直最小化着
-            self._cleanup(minimized_console)
+            failed_run = True
             raise
+        finally:
+            try:
+                if live_damage:
+                    live_damage.close()
+            finally:
+                if failed_run:
+                    self._cleanup(minimized_console)
 
-        if cfg.damage_trigger and self._event_frame is not None and not self._event_flushed:
-            self._flush_event(time.time())
         total_time = time.time() - started
         summary = {
             "saved": self.seq,
@@ -822,6 +862,8 @@ class Monitor:
             "outdir": str(cfg.outdir),
             "stopped_by_limit": stopped_by_limit,
             "stopped_by_user": stopped_by_user,
+            "damage_samples_dropped": live_damage.samples_dropped if live_damage else 0,
+            "damage_jobs_dropped": live_damage.dropped if live_damage else 0,
         }
         self._say(
             "\n汇总: 存了 {saved} 帧 {by_trigger}，跳过 {skipped_duplicates} 张重复图，"
