@@ -456,21 +456,6 @@ def capture_window(hwnd: int, method: str = "auto") -> CaptureResult:
     raise RuntimeError(f"抓图失败: {last_error}")
 
 
-def capture_region(hwnd: int, box) -> CaptureResult:
-    """Capture a client-relative ROI directly from the screen DC (no full bitmap)."""
-    handle = wintypes.HWND(hwnd)
-    client = wintypes.RECT()
-    if not user32.GetClientRect(handle, ctypes.byref(client)) or user32.IsIconic(handle):
-        raise ValueError('窗口最小化或客户区不可用')
-    x0, y0, x1, y1 = map(int, box)
-    if not (0 <= x0 < x1 <= client.right and 0 <= y0 < y1 <= client.bottom):
-        raise ValueError('区域超出客户区，窗口尺寸可能已改变')
-    origin = wintypes.POINT(x0, y0)
-    if not user32.ClientToScreen(handle, ctypes.byref(origin)):
-        raise OSError('ClientToScreen 失败')
-    return _capture_once(handle, x1 - x0, y1 - y0, (origin.x, origin.y), 'screendc')
-
-
 def _capture_once(
     handle, width: int, height: int, origin: Tuple[int, int], method: str
 ) -> CaptureResult:

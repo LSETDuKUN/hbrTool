@@ -82,7 +82,7 @@ class WidgetConfig:
     #: 留出窗口边框余量，适配窗口模式下游戏右侧的窄空隙。
     width: int = 250
     height: int = 760
-    fps: float = 30.0
+    fps: float = 15.0
     method: str = "auto"
     hotkey_name: Optional[str] = "F9"
     stop_hotkey_name: Optional[str] = "F10"
@@ -170,7 +170,6 @@ class Widget:
         self.thread: Optional[threading.Thread] = None
         self.monitor: Optional[Monitor] = None
         self._stop = threading.Event()
-        self._pause = threading.Event()
         self._photo = None
         self._overlap = False
         self._want_running = False
@@ -229,7 +228,6 @@ class Widget:
         menu.add_command(label="星屑资料室 · 角色 / 风格 / 技能", command=self._open_library)
         menu.add_separator()
         menu.add_command(label="抓取当前帧  F9", command=self.snap)
-        menu.add_command(label="暂停 / 继续识别", command=self.toggle_pause)
         menu.add_command(label="窗口归位", command=self.reposition)
         menu.add_command(label="打开帧目录", command=self.open_dir)
         menu.add_separator()
@@ -271,19 +269,12 @@ class Widget:
         tk.Button(targets, text="战斗设置", command=self._open_battle_settings, bg=PANEL,
             fg="#8ee8ff", relief="flat", font=small, padx=6).pack(side="right")
         self._enemy_var = tk.StringVar(value=str(self.ledger.enemies))
-        self.lbl_enemy_hint = tk.Label(root, text="仅统计合计伤害；怪数不参与倍乘",
+        self.lbl_enemy_hint = tk.Label(root, text="平均 × 怪数；修改后重算本轮",
             bg=BG, fg=DIM, font=tiny, anchor="w")
 
-        controls = tk.Frame(root, bg=BG)
-        controls.pack(fill='x', padx=12, pady=(0, 8))
-        self.btn_toggle = RoundedButton(controls, text="开始", command=self.toggle, bg=ACCENT,
+        self.btn_toggle = RoundedButton(root, text="开始", command=self.toggle, bg=ACCENT,
             fg=BG, activebackground="#ffb9d7", relief="flat", font=bold, pady=5)
-        self.btn_toggle.pack(side='left', fill='x', expand=True)
-        self.btn_pause = RoundedButton(controls, text='暂停', command=self.toggle_pause,
-                                      bg=PANEL, fg=DIM, font=bold, height=40)
-        self.btn_pause.pack(side='right', padx=(6, 0))
-        self.btn_toggle.config(width=120)
-        self.btn_pause.config(width=68)
+        self.btn_toggle.pack(fill="x", padx=12, pady=(0, 8))
         self.lbl_preview = tk.Label(root, bg=PANEL, bd=0)
         footer = tk.Frame(root, bg=BG)
         footer.pack(side="bottom", fill="x", padx=12, pady=(5, 8))
@@ -291,7 +282,7 @@ class Widget:
         self._content.pack(fill="both", expand=True, padx=12)
         tk.Label(self._content, text="伤害明细", bg=BG, fg=FG, font=bold,
                  anchor="w").pack(fill="x", pady=(0, 5))
-        tk.Label(self._content, text="待确认不入账 · 同次显示可修正", bg=BG, fg=DIM,
+        tk.Label(self._content, text="未知 / 残缺不入账", bg=BG, fg=DIM,
                  font=tiny, anchor="w").pack(fill="x", pady=(0, 5))
         damage_wrap = tk.Frame(self._content, bg=PANEL)
         damage_wrap.pack(fill="both", expand=True)
@@ -352,7 +343,7 @@ class Widget:
         self.lbl_warn.pack(fill="x")
         self._render_resources()
         self._toggle_preview()
-        self._log("挂件已就绪；仅统计合计伤害，同次显示只入账一次，待确认不计入。")
+        self._log("挂件已就绪；未知和残缺读数不计入累计伤害。")
         self.root.after(80, self._pump)
         self.root.after(2000, self._watchdog)
         self._place_beside(None)
@@ -413,7 +404,7 @@ class Widget:
             self.lbl_enemy_hint.config(text=str(exc), fg=ERR)
             return
         self.cfg.enemy_count = self.ledger.enemies
-        self.lbl_enemy_hint.config(text="仅统计合计伤害；怪数不参与倍乘", fg=DIM)
+        self.lbl_enemy_hint.config(text="平均 × 怪数；修改后重算本轮", fg=DIM)
         self._render_damage()
         self._save_totals({"type": "enemy_count", "enemy_count": self.ledger.enemies})
 
@@ -447,7 +438,7 @@ class Widget:
             if key == "dp":
                 entry.focus_set()
                 entry.selection_range(0, "end")
-        tk.Label(body, text="伤害先扣 DP，超出部分扣 HP。\n修改后重算本轮；新一轮恢复初始值。\n仅统计合计伤害，怪数不参与倍乘。",
+        tk.Label(body, text="伤害先扣 DP，超出部分扣 HP。\n修改后重算本轮；新一轮恢复初始值。",
             bg=BG, fg=DIM, font=self._small, justify="left", anchor="w").pack(fill="x", pady=(10, 2))
         error = tk.Label(body, text="", bg=BG, fg=ERR, font=self._small, anchor="w")
         error.pack(fill="x", pady=4)
@@ -489,7 +480,7 @@ class Widget:
                                self.ledger.total, self.ledger.last_damage)
         self.dp_meter.set_values(state.dp, state.dp_max, state.last_dp_loss)
         self.hp_meter.set_values(state.hp, state.hp_max, state.last_hp_loss)
-        text = f"最近  {state.last_damage:,}" if state.last_damage else "最近有效伤害  —"
+        text = f"最近有效伤害  {state.last_damage:,}" if state.last_damage else "最近有效伤害  —"
         self.lbl_last_damage.config(text=text)
         self.lbl_pool_hint.config(text=f"{self.ledger.enemies} 怪 · DP → HP"
             if state.dp_max or state.hp_max else "请设置初始值 →")
@@ -519,8 +510,7 @@ class Widget:
             value, label = reading["value"], reading["label"]
             amount = self.ledger.amount(reading)
             if amount is None:
-                reason = ("待确认" if reading.get('confirmed') is False else
-                          "残缺" if reading.get("unresolved", 0) else "未知")
+                reason = "残缺" if reading.get("unresolved", 0) else "未知"
                 line = f"{number:02d}  [{reason}] {reading.get('text', value)}\n     未计入\n"
                 tag = "pending"
             elif label == "平均":
@@ -566,9 +556,6 @@ class Widget:
     def _should_stop_thread(self) -> bool:
         return self._stop.is_set()
 
-    def _should_pause_thread(self) -> bool:
-        return self._pause.is_set()
-
     # ------------------------------------------------------------ 主线程刷新
 
     def _pump(self) -> None:
@@ -599,10 +586,7 @@ class Widget:
         self.root.after(80, self._pump)
 
     def _update_stats(self, stats: dict) -> None:
-        if self._pause.is_set():
-            stats = dict(stats, phase='已暂停 · 累计保留')
-        self.lbl_target.config(text="HBR · 画面异常" if stats.get("broken") else
-                               "HBR · " + stats.get('phase', '识别中'),
+        self.lbl_target.config(text="HBR · 画面异常" if stats.get("broken") else "HBR · 识别中",
                                fg=WARN if stats.get("broken") else OK)
         s = self._stat_labels
         s["method"].config(text=str(stats.get("method", "-")))
@@ -661,8 +645,6 @@ class Widget:
             return
         if self._want_running:
             return
-        self._pause.clear()
-        self.btn_pause.config(text='暂停', fg=FG)
         try:
             self.ledger.set_enemies(self._enemy_var.get())
         except ValueError as exc:
@@ -685,9 +667,6 @@ class Widget:
     def _connect(self) -> None:
         if not self._want_running:
             self._on_thread_finished()
-            return
-
-        if self._pause.is_set() or (self.thread is not None and self.thread.is_alive()):
             return
 
         win32.set_dpi_aware()
@@ -742,10 +721,7 @@ class Widget:
             on_log=self._on_log_thread,
             on_damage=self._on_damage_thread,
             should_stop=self._should_stop_thread,
-            should_pause=self._should_pause_thread,
             damage_trigger=self.cfg.damage_trigger,
-            event_pipeline=True,
-            event_fps=self.cfg.fps,
             damage_recheck=self.cfg.damage_recheck,
             damage_gap_seconds=self.cfg.damage_gap_seconds,
             damage_min_run=self.cfg.damage_min_run,
@@ -766,31 +742,12 @@ class Widget:
 
     def stop(self) -> None:
         self._want_running = False
-        if hasattr(self, '_pause'):
-            self._pause.clear()
-            self.btn_pause.config(text='暂停', fg=DIM)
         self._stop.set()
         if self.thread is not None and self.thread.is_alive():
             self._log("已请求停止，等待线程收尾...")
         else:
             # 还在等窗口重试阶段就直接取消了
             self._on_thread_finished()
-
-    def toggle_pause(self) -> None:
-        if not self._want_running:
-            return
-        if self._pause.is_set():
-            self._pause.clear()
-            self.btn_pause.config(text='暂停', fg=FG)
-            self.lbl_target.config(text='HBR · 正在识别', fg=OK)
-            self._log('继续本轮识别，累计伤害与 DP/HP 保留。')
-            if self.thread is None or not self.thread.is_alive():
-                self._connect()
-        else:
-            self._pause.set()
-            self.btn_pause.config(text='继续', fg=ACCENT)
-            self.lbl_target.config(text='已暂停 · 累计保留', fg=WARN)
-            self._log('暂停自动采集与识别；已排队的候选会完成收尾。')
 
     def _on_thread_finished(self) -> None:
         self.thread = None
@@ -799,9 +756,6 @@ class Widget:
         # 之前的写法是直接停住，表现就是"挂件总是丢失"：
         # 游戏窗口最小化一会儿、或者被遮挡触发中止，挂件就再也不干活了。
         if self._want_running:
-            if self._pause.is_set():
-                self.lbl_target.config(text='已暂停 · 累计保留', fg=WARN)
-                return
             # 跑了足够久才算"这次连接是好的"，把退避计数清零
             if self._monitor_started_at and time.time() - self._monitor_started_at > 30:
                 self._restarts = 0
@@ -817,8 +771,6 @@ class Widget:
             return
 
         self.btn_toggle.config(text="开始", bg=ACCENT, fg=BG)
-        self._pause.clear()
-        self.btn_pause.config(text='暂停', fg=DIM)
         self.lbl_target.config(text="已停止 · 可自由拖动", fg=DIM)
         self._log("已停止。")
         self._maybe_ask_keep()
@@ -1024,7 +976,7 @@ class Widget:
 
     def _ensure_visible(self) -> bool:
         """确认挂件还在屏幕上、也没压在游戏上。有问题就纠正。返回是否做了纠正。"""
-        if not self._want_running or (getattr(self, '_pause', None) and self._pause.is_set()):
+        if not self._want_running:
             return False
         x, y, width, height = self._physical_bounds()
         screen_w = self.root.winfo_screenwidth()

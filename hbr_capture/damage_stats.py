@@ -51,7 +51,6 @@ class DamageLedger:
     enemies: int = 1
     events: dict = field(default_factory=dict)
     _sequence: int = 0
-    _revisions: dict = field(default_factory=dict)
 
     def set_enemies(self, value):
         self.enemies = enemy_count(value)
@@ -62,24 +61,16 @@ class DamageLedger:
             self._sequence += 1
             identity = ("legacy", self._sequence)
         key = (event.get("run"), identity)
-        tracked = event.get('event_tracking', False)
-        if tracked:
-            revision = event.get('revision', 0)
-            if revision <= self._revisions.get(key, -1):
-                return
-            self._revisions[key] = revision
         readings = [dict(r) for r in event["readings"]]
         old = self.events.get(key)
         # Later OCR failures must not replace a previously confirmed value.
-        if old is not None and not tracked:
+        if old is not None:
             readings = [previous if self.amount(previous) is not None
                         and self.amount(current) is None else current
                         for previous, current in zip(old, readings)] if len(old) == len(readings) else old
         self.events[key] = readings
 
     def amount(self, reading):
-        if reading.get('confirmed') is False:
-            return None
         if reading.get("unresolved", 0) or reading.get("label") not in ("合计", "平均"):
             return None
         return reading["value"] * (self.enemies if reading["label"] == "平均" else 1)

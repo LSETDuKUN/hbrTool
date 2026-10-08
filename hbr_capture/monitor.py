@@ -53,14 +53,11 @@ class MonitorConfig:
     on_damage: Optional[Callable] = None
     # 外部（GUI）请求停止。返回 True 就收工。
     should_stop: Optional[Callable] = None
-    should_pause: Optional[Callable] = None
 
     # ---- 内容触发：认出伤害数字就立刻存 ----
     # settle 的哲学是"等画面稳定"，而伤害数字恰好出现在动画过程中 ——
     # 实测 48 帧 settle 里只有 1 帧是伤害帧。所以要用识别结果直接触发。
     damage_trigger: bool = False
-    event_pipeline: bool = False      # Widget enables the visual-event pipeline.
-    event_fps: float = 30.0
     damage_recheck: int = 1            # 每 N 帧识别一次（1 = 每帧，实测 4ms 扛得住）
     #: 同一个数值"连续可见"多久之内算同一次命中。
     #: 注意用的是**上次看见**的时间，不是上次存盘的时间 ——
@@ -276,8 +273,6 @@ class Monitor:
                     "method_requested": cfg.method,
                     "method_used": method_used,
                     "fps": cfg.fps,
-                    "event_pipeline": cfg.event_pipeline,
-                    "event_fps": cfg.event_fps,
                     "hotkey": cfg.hotkey_name,
                     "on_change": cfg.on_change,
                     "settle": cfg.settle,
@@ -615,9 +610,6 @@ class Monitor:
 
         self._say("开始抓图自检（约 2 秒）...")
         self._ensure_live_capture(grabber)
-        if cfg.damage_trigger and cfg.event_pipeline:
-            # Direct regional capture always uses visible screen pixels.
-            grabber.method = 'screendc'
 
         minimized_console = None
         if grabber.method == "screendc":
@@ -662,13 +654,6 @@ class Monitor:
                     )
 
         self._write_session(info, grabber.method)
-
-        if cfg.damage_trigger and cfg.event_pipeline:
-            try:
-                from .event_monitor import EventMonitor
-                return EventMonitor(self, grabber).run(hotkey_vk, stop_vk)
-            finally:
-                self._cleanup(minimized_console)
 
         self._say(
             "监视中"
@@ -716,10 +701,6 @@ class Monitor:
                     stopped_by_user = True
                     self._say("\n收到停止请求，收工。")
                     break
-
-                if cfg.should_pause and cfg.should_pause():
-                    time.sleep(.05)
-                    continue
 
                 try:
                     frame = grabber.grab()

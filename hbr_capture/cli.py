@@ -332,8 +332,6 @@ def cmd_watch(args) -> int:
         minimize_console=False if args.keep_console else None,
         stop_hotkey_name=None if args.no_stop_hotkey else args.stop_hotkey,
         damage_trigger=args.damage_trigger,
-        event_pipeline=True,
-        event_fps=args.damage_fps,
         damage_recheck=args.damage_recheck,
     )
     monitor = Monitor(config)
@@ -488,11 +486,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ask-keep", action="store_true",
                    help="结束时问一句「这次的帧留着还是删掉」")
     p.add_argument("--damage-trigger", action="store_true",
-                   help="启用合计伤害事件识别，保存区域候选证据，替代全屏 settle")
+                   help="认出伤害数字就立刻存帧（比 settle 可靠得多）")
     p.add_argument("--damage-recheck", type=int, default=1,
-                   help="兼容旧识别参数；事件模式不使用")
-    p.add_argument('--damage-fps', type=float, default=30.0,
-                   help='合计伤害事件的区域采集帧率（默认 30，等待时降为 8）')
+                   help="每 N 帧跑一次伤害识别（默认 1 = 每帧）")
     p.add_argument("--keep-console", action="store_true",
                    help="不要自动最小化本工具的控制台窗口（默认会在它挡住游戏时临时最小化）")
     p.add_argument("--stop-hotkey", default="F10",
@@ -510,10 +506,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--outdir", default="frames")
     p.add_argument("--width", type=int, default=250, help="挂件宽度（默认 250）")
     p.add_argument("--height", type=int, default=760, help="挂件高度（默认 760）")
-    p.add_argument("--enemy-count", type=int, default=1, help="保留怪物数量设置；合计事件不倍乘")
+    p.add_argument("--enemy-count", type=int, default=1, help="怪物数量（平均伤害乘数）")
     p.add_argument("--dp", type=int, default=0, help="量表初始 DP")
     p.add_argument("--hp", type=int, default=0, help="量表初始 HP")
-    p.add_argument("--fps", type=float, default=30.0)
+    p.add_argument("--fps", type=float, default=15.0)
     p.add_argument("--method", default="auto",
                    choices=["auto", "printwindow", "screendc", "bitblt"])
     p.add_argument("--hotkey", default="F9", help="抓当前帧热键（默认 F9）")

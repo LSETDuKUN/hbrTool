@@ -111,12 +111,7 @@ def _run_sidecars(outdir, run_id: str) -> List[Path]:
         outdir / f"session-{run_id}.log",
         outdir / f"session-{run_id}.json",
         outdir / f"session-{run_id}-totals.jsonl",
-        outdir / f"session-{run_id}-events.jsonl",
     ]
-    # Validate before globbing; audit artifacts use flat, run-scoped filenames.
-    _safe_child(outdir, run_id)
-    candidates.extend(outdir.glob(f'session-{run_id}-ocr-*.png'))
-    candidates.extend(outdir.glob(f'session-{run_id}-diagnostic-*.png'))
     return [p for p in candidates if p.exists()]
 
 

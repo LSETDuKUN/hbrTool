@@ -113,7 +113,7 @@ def extract_damage_lines(
         band_mask,
         # 门槛要给小：3 位数的伤害每行墨迹本来就不多，
         # 用原来的 40 会把整行判成"没有文字"，短数字全部漏掉。
-        min_pixels=max(4, int(round(min(10, min_row_pixels) * scale))),
+        min_pixels=max(4, int(round(10 * scale))),
         min_height=scaled_min_height,
     )
 
@@ -261,26 +261,6 @@ class DamageReader:
         height, width = rgb_band.shape[:2]
         return self._read_with_bands(rgb_band, (0, height), (0, width), recognize_labels)
 
-    def read_total_band(self, rgb_band: np.ndarray) -> List[DamageRead]:
-        """Read a fixed numeric ROI after its total-label landmark was verified.
-
-        A single digit may not meet the general row-ink threshold. Retry only
-        an empty result so background ink cannot change already found rows.
-        """
-        found = self.read_band(rgb_band, recognize_labels=False)
-        if found:
-            return found
-        threshold = self.min_row_pixels
-        first_diagnostics = [dict(item, row_pass='standard') for item in self.last_diagnostics]
-        try:
-            self.min_row_pixels = 4
-            found = self.read_band(rgb_band, recognize_labels=False)
-            self.last_diagnostics = first_diagnostics + [
-                dict(item, row_pass='single_digit_retry') for item in self.last_diagnostics]
-            return found
-        finally:
-            self.min_row_pixels = threshold
-
     def read(self, source) -> List[DamageRead]:
         """从一整帧里读出所有伤害数字（一帧可能有多个）。"""
         rgb = _as_rgb(source)
@@ -288,7 +268,6 @@ class DamageReader:
 
     def _read_with_bands(self, rgb, y_band, x_band, recognize_labels=True) -> List[DamageRead]:
         mask = segment.near_white_mask(rgb)
-        self.last_diagnostics = []
         lines = extract_damage_lines(
             mask, y_band, x_band,
             min_height=max(1, int(round(35 * self.scale))),
@@ -301,9 +280,6 @@ class DamageReader:
         for _, _, glyphs in lines:
             scored = self.store.read_scored(glyphs, self.min_score)
             text = "".join(char for char, _, _ in scored)
-            self.last_diagnostics.append(dict(text=text, glyphs=[
-                dict(box=list(g.box), text=char, score=float(score))
-                for g, (char, score, _) in zip(glyphs, scored)]))
             if not any(char.isdigit() for char in text):
                 continue
             values = [score for _, score, _ in scored]

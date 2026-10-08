@@ -27,8 +27,6 @@ class ReviewRegressionTests(unittest.TestCase):
         from hbr_capture.capture import Frame
         from hbr_capture.monitor import Monitor, MonitorConfig
         fixture = Path(__file__).resolve().parents[1] / "results/20261006-142335/000045.png"
-        if not fixture.is_file():
-            self.skipTest('Optional historical capture was removed')
         with Image.open(fixture) as source:
             image = source.convert("RGBA")
             frame = Frame(image.width, image.height, image.tobytes("raw", "BGRA"),
