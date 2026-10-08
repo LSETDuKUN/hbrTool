@@ -1,15 +1,16 @@
 # 识别层依赖
 #
-# 抓屏层（hbr_capture）和计算层（hbr_calc）是**纯标准库**，不需要装任何东西。
-# 只有识别层（hbr_recog）需要下面这些。
+# 基础抓屏和计算层为标准库；实时事件识别还会调用下面的识别层依赖。
 #
 # 安装（默认源在国内可能 403，用镜像更稳）:
 #     F:\python\python.exe -m pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/
 
 numpy>=1.24
 Pillow>=10.0
+opencv-python>=4.8  # Small HUD template matching, independent of OCR results.
 
-# 可选但强烈建议：用来读伤害数字上方的「合计伤害 / 平均伤害」标签。
+# 旧版宽区域识别使用此依赖读取「合计伤害 / 平均伤害」标签。
+# 新事件管线直接匹配固定合计标签，无需启动 RapidOCR。
 # 不装也能跑 —— 会自动退回模板匹配，但标签区分度差很多
 # （实测模板法最小类间差只有 0.02，OCR 是 0.71~0.99 的置信度）。
 rapidocr-onnxruntime>=1.4.4

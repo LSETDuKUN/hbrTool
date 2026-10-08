@@ -82,7 +82,7 @@ class WidgetConfig:
     #: 留出窗口边框余量，适配窗口模式下游戏右侧的窄空隙。
     width: int = 250
     height: int = 760
-    fps: float = 15.0
+    fps: float = 30.0
     method: str = "auto"
     hotkey_name: Optional[str] = "F9"
     stop_hotkey_name: Optional[str] = "F10"
@@ -269,7 +269,7 @@ class Widget:
         tk.Button(targets, text="战斗设置", command=self._open_battle_settings, bg=PANEL,
             fg="#8ee8ff", relief="flat", font=small, padx=6).pack(side="right")
         self._enemy_var = tk.StringVar(value=str(self.ledger.enemies))
-        self.lbl_enemy_hint = tk.Label(root, text="平均 × 怪数；修改后重算本轮",
+        self.lbl_enemy_hint = tk.Label(root, text="仅统计合计伤害；怪数不参与倍乘",
             bg=BG, fg=DIM, font=tiny, anchor="w")
 
         self.btn_toggle = RoundedButton(root, text="开始", command=self.toggle, bg=ACCENT,
@@ -282,7 +282,7 @@ class Widget:
         self._content.pack(fill="both", expand=True, padx=12)
         tk.Label(self._content, text="伤害明细", bg=BG, fg=FG, font=bold,
                  anchor="w").pack(fill="x", pady=(0, 5))
-        tk.Label(self._content, text="未知 / 残缺不入账", bg=BG, fg=DIM,
+        tk.Label(self._content, text="待确认不入账 · 同次显示可修正", bg=BG, fg=DIM,
                  font=tiny, anchor="w").pack(fill="x", pady=(0, 5))
         damage_wrap = tk.Frame(self._content, bg=PANEL)
         damage_wrap.pack(fill="both", expand=True)
@@ -343,7 +343,7 @@ class Widget:
         self.lbl_warn.pack(fill="x")
         self._render_resources()
         self._toggle_preview()
-        self._log("挂件已就绪；未知和残缺读数不计入累计伤害。")
+        self._log("挂件已就绪；仅统计合计伤害，同次显示只入账一次，待确认不计入。")
         self.root.after(80, self._pump)
         self.root.after(2000, self._watchdog)
         self._place_beside(None)
@@ -404,7 +404,7 @@ class Widget:
             self.lbl_enemy_hint.config(text=str(exc), fg=ERR)
             return
         self.cfg.enemy_count = self.ledger.enemies
-        self.lbl_enemy_hint.config(text="平均 × 怪数；修改后重算本轮", fg=DIM)
+        self.lbl_enemy_hint.config(text="仅统计合计伤害；怪数不参与倍乘", fg=DIM)
         self._render_damage()
         self._save_totals({"type": "enemy_count", "enemy_count": self.ledger.enemies})
 
@@ -438,7 +438,7 @@ class Widget:
             if key == "dp":
                 entry.focus_set()
                 entry.selection_range(0, "end")
-        tk.Label(body, text="伤害先扣 DP，超出部分扣 HP。\n修改后重算本轮；新一轮恢复初始值。",
+        tk.Label(body, text="伤害先扣 DP，超出部分扣 HP。\n修改后重算本轮；新一轮恢复初始值。\n仅统计合计伤害，怪数不参与倍乘。",
             bg=BG, fg=DIM, font=self._small, justify="left", anchor="w").pack(fill="x", pady=(10, 2))
         error = tk.Label(body, text="", bg=BG, fg=ERR, font=self._small, anchor="w")
         error.pack(fill="x", pady=4)
@@ -480,7 +480,7 @@ class Widget:
                                self.ledger.total, self.ledger.last_damage)
         self.dp_meter.set_values(state.dp, state.dp_max, state.last_dp_loss)
         self.hp_meter.set_values(state.hp, state.hp_max, state.last_hp_loss)
-        text = f"最近有效伤害  {state.last_damage:,}" if state.last_damage else "最近有效伤害  —"
+        text = f"最近  {state.last_damage:,}" if state.last_damage else "最近有效伤害  —"
         self.lbl_last_damage.config(text=text)
         self.lbl_pool_hint.config(text=f"{self.ledger.enemies} 怪 · DP → HP"
             if state.dp_max or state.hp_max else "请设置初始值 →")
@@ -510,7 +510,8 @@ class Widget:
             value, label = reading["value"], reading["label"]
             amount = self.ledger.amount(reading)
             if amount is None:
-                reason = "残缺" if reading.get("unresolved", 0) else "未知"
+                reason = ("待确认" if reading.get('confirmed') is False else
+                          "残缺" if reading.get("unresolved", 0) else "未知")
                 line = f"{number:02d}  [{reason}] {reading.get('text', value)}\n     未计入\n"
                 tag = "pending"
             elif label == "平均":
@@ -586,7 +587,8 @@ class Widget:
         self.root.after(80, self._pump)
 
     def _update_stats(self, stats: dict) -> None:
-        self.lbl_target.config(text="HBR · 画面异常" if stats.get("broken") else "HBR · 识别中",
+        self.lbl_target.config(text="HBR · 画面异常" if stats.get("broken") else
+                               "HBR · " + stats.get('phase', '识别中'),
                                fg=WARN if stats.get("broken") else OK)
         s = self._stat_labels
         s["method"].config(text=str(stats.get("method", "-")))
@@ -722,6 +724,8 @@ class Widget:
             on_damage=self._on_damage_thread,
             should_stop=self._should_stop_thread,
             damage_trigger=self.cfg.damage_trigger,
+            event_pipeline=True,
+            event_fps=self.cfg.fps,
             damage_recheck=self.cfg.damage_recheck,
             damage_gap_seconds=self.cfg.damage_gap_seconds,
             damage_min_run=self.cfg.damage_min_run,
