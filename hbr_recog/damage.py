@@ -291,6 +291,43 @@ class DamageReader:
             digits_text = "".join(char for char, _, _ in scored if char.isdigit())
             if not digits_text:
                 continue
+            x0 = min(g.x0 for g in glyphs)
+            y0 = min(g.y0 for g in glyphs)
+            x1 = max(g.x1 for g in glyphs)
+            y1 = max(g.y1 for g in glyphs)
+            label_result = None
+            ocr = getattr(self.label_store, 'ocr', None)
+            if self.repair_unknown and ocr is not None and (unresolved or min(values) < .65):
+                row = rgb[max(0, y0 - 4):min(rgb.shape[0], y1 + 4),
+                          max(0, x0 - 3):min(rgb.shape[1], x1 + 3)]
+                for raw, score in ocr._recognise(row):
+                    if not re.fullmatch(r'[0-9]+(?:[,，][0-9]{3})*', raw.strip()):
+                        continue
+                    candidate = raw.strip().replace(',', '').replace('，', '')
+                    same_width = len(candidate) == len(scored)
+                    if same_width:
+                        # High-confidence glyphs are anchors; a weak 0/6/9 match
+                        # must not override a strongly recognized full numeric row.
+                        agrees = all(char == '?' or char == candidate[i] or confidence < .75
+                                     for i, (char, confidence, _) in enumerate(scored))
+                    else:
+                        # Over-segmentation (e.g. 0 split into ??) can change length.
+                        # Require at least two strong anchors in order and stricter OCR.
+                        anchors = [char for char, confidence, _ in scored if char != '?' and confidence >= .75]
+                        pattern = '.*'.join(re.escape(char) for char in anchors)
+                        agrees = unresolved > 0 and len(anchors) >= 2 and bool(re.search(pattern, candidate))
+                    if score < (.9 if same_width else .95) or not agrees:
+                        continue
+                    strict = same_width and all(char == '?' or char == candidate[i]
+                                                for i, (char, _, _) in enumerate(scored))
+                    if not strict:
+                        label_result = self.label_store.read(rgb, (x0, y0, x1, y1))
+                        if label_result.name not in ('合计', '平均'):
+                            continue
+                    text = digits_text = candidate
+                    unresolved = 0
+                    values = [score]
+                    break
             # 未认出来的字太多说明这根本不是数字串。
             # 实测 `BREAK!` 会被读成 `8????` —— 只要求"含数字"的话，
             # 它会被当成伤害值 8 存下来，是纯假阳性。
@@ -301,29 +338,9 @@ class DamageReader:
             worst = min(values) if values else 0.0
             if len(scored) < 3 and worst < self.short_run_confidence:
                 continue
-            x0 = min(g.x0 for g in glyphs)
-            y0 = min(g.y0 for g in glyphs)
-            x1 = max(g.x1 for g in glyphs)
-            y1 = max(g.y1 for g in glyphs)
-
-            # Only repair '?' positions. Never replace already recognized digits
-            # with a conflicting OCR guess, or expand/shorten the number here.
-            ocr = getattr(self.label_store, 'ocr', None)
-            if unresolved and self.repair_unknown and ocr is not None:
-                row = rgb[max(0, y0 - 4):min(rgb.shape[0], y1 + 4),
-                          max(0, x0 - 3):min(rgb.shape[1], x1 + 3)]
-                pattern = re.escape(text).replace(r'\?', '[0-9]')
-                for candidate, score in ocr._recognise(row):
-                    candidate = candidate.replace(',', '').replace('，', '').strip()
-                    if score >= .9 and re.fullmatch(pattern, candidate):
-                        text = digits_text = candidate
-                        unresolved = 0
-                        values = [s for char, s, _ in scored if char != '?'] + [score]
-                        break
-
             # 标签决定这个数字是"总和"还是"平均值"，含义天差地别，必须一起读。
             # 注意：标签是「平均伤害」时，总和 = 平均值 × 怪物数。
-            label_result = (
+            label_result = label_result or (
                 self.label_store.read(rgb, (x0, y0, x1, y1))
                 if recognize_labels else None
             )
@@ -333,7 +350,7 @@ class DamageReader:
                     text=text,
                     confidence=min(values) if values else 0.0,
                     box=(x0, y0, x1, y1),
-                    digits=len(scored),
+                    digits=len(text),
                     unresolved=unresolved,
                     label=label_result.name if label_result else "未知",
                     label_score=label_result.score if label_result else 0.0,

@@ -22,6 +22,23 @@ def frame(number):
 
 
 class CountingFixes(unittest.TestCase):
+    def test_second_live_run_confusion_and_filtered_number(self):
+        from hbr_recog.damage import DamageReader
+        reader = DamageReader(min_run=1, repair_unknown=True)
+        if getattr(reader.label_store, 'ocr', None) is None:
+            self.skipTest('RapidOCR is not available')
+        for name, expected in [('second-47', 409110), ('second-49', 130692)]:
+            with Image.open(Path(__file__).parent / f'fixtures/previousbest/{name}.png') as im:
+                rgb = np.array(im.convert('RGB'))
+            self.assertEqual([(r.value, r.unresolved) for r in reader.read_band(rgb, False)], [(expected, 0)])
+            with tempfile.TemporaryDirectory() as tmp:
+                mon, events = self.monitor(Path(tmp))
+                for t in (0, .35, 1, 3): self.check(mon, frame(name), t)
+                ledger = DamageLedger()
+                for event in events: ledger.add(event)
+                self.assertEqual(ledger.total, expected)
+                self.assertEqual(len(ledger.events), 1)
+
     def test_native_components_preserve_four_neighbour_filter(self):
         from hbr_recog.segment import drop_small_components
         import sys
@@ -42,7 +59,8 @@ class CountingFixes(unittest.TestCase):
         if getattr(reader.label_store, 'ocr', None) is None:
             self.skipTest('RapidOCR is not available')
         self.assertEqual([(r.value, r.unresolved) for r in reader.read_band(rgb, False)], [(2793129, 0)])
-        fake = SimpleNamespace(ocr=SimpleNamespace(_recognise=lambda row: [('9,793,129', .99)]))
+        fake = SimpleNamespace(ocr=SimpleNamespace(_recognise=lambda row: [('2,793,229', .99)]),
+                               read=lambda *args: SimpleNamespace(name='合计', score=.99))
         reader.label_store = fake
         self.assertEqual([(r.text, r.unresolved) for r in reader.read_band(rgb, False)], [('279?129', 1)])
 
