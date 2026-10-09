@@ -13,6 +13,7 @@ tools/ 下的调试脚本和以后的实时识别都用它，避免逻辑两份�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
@@ -208,6 +209,7 @@ class DamageReader:
         short_run_confidence: float = 0.70,
         scale: float = 1.0,
         label_store=None,
+        repair_unknown: bool = False,
     ):
         if store is None:
             store = templates.TemplateStore.load(DEFAULT_TEMPLATES)
@@ -222,6 +224,7 @@ class DamageReader:
         #: 所以对短串要更严 —— 实测真的 `8` 置信 0.94，`BREAK!` 误读出的 `8` 只有 0.52。
         self.short_run_confidence = short_run_confidence
         self.scale = scale
+        self.repair_unknown = repair_unknown
 
         # 标签识别器（合计伤害 vs 平均伤害）。
         # 优先用 RapidOCR；没装就退回模板匹配；都没有就一律「未知」。
@@ -251,6 +254,7 @@ class DamageReader:
             short_run_confidence=self.short_run_confidence,
             scale=scale,
             label_store=self.label_store,
+            repair_unknown=self.repair_unknown,
         )
 
     def read_band(self, rgb_band: np.ndarray, recognize_labels: bool = True) -> List[DamageRead]:
@@ -301,6 +305,21 @@ class DamageReader:
             y0 = min(g.y0 for g in glyphs)
             x1 = max(g.x1 for g in glyphs)
             y1 = max(g.y1 for g in glyphs)
+
+            # Only repair '?' positions. Never replace already recognized digits
+            # with a conflicting OCR guess, or expand/shorten the number here.
+            ocr = getattr(self.label_store, 'ocr', None)
+            if unresolved and self.repair_unknown and ocr is not None:
+                row = rgb[max(0, y0 - 4):min(rgb.shape[0], y1 + 4),
+                          max(0, x0 - 3):min(rgb.shape[1], x1 + 3)]
+                pattern = re.escape(text).replace(r'\?', '[0-9]')
+                for candidate, score in ocr._recognise(row):
+                    candidate = candidate.replace(',', '').replace('，', '').strip()
+                    if score >= .9 and re.fullmatch(pattern, candidate):
+                        text = digits_text = candidate
+                        unresolved = 0
+                        values = [s for char, s, _ in scored if char != '?'] + [score]
+                        break
 
             # 标签决定这个数字是"总和"还是"平均值"，含义天差地别，必须一起读。
             # 注意：标签是「平均伤害」时，总和 = 平均值 × 怪物数。

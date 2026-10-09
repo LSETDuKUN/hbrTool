@@ -98,6 +98,7 @@ def main(argv=None) -> int:
         store=dmg.templates.TemplateStore.load(args.templates),
         min_score=args.min_score,
         min_run=1,
+        repair_unknown=True,
     )
     times = load_timestamps(frames_dir)
     superseded = superseded_damage_files(frames_dir, paths)

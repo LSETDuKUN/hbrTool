@@ -374,7 +374,8 @@ class Monitor:
         if self._reader is None:
             from hbr_recog import damage as damage_mod
 
-            self._reader = damage_mod.DamageReader(min_run=self.cfg.damage_min_run)
+            self._reader = damage_mod.DamageReader(min_run=self.cfg.damage_min_run,
+                                                  repair_unknown=True)
         return self._reader
 
     def _damage_already_saved(self) -> bool:
@@ -783,6 +784,9 @@ class Monitor:
                         )
                     )
 
+        if cfg.damage_trigger:
+            self._say("识别模型预热中，请等显示‘监视中’后开始行动。")
+            self._ensure_reader()
         self._write_session(info, grabber.method)
 
         self._say(

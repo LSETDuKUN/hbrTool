@@ -22,6 +22,30 @@ def frame(number):
 
 
 class CountingFixes(unittest.TestCase):
+    def test_native_components_preserve_four_neighbour_filter(self):
+        from hbr_recog.segment import drop_small_components
+        import sys
+        rng = np.random.default_rng(4)
+        for density in (0, .1, .5, .9, 1):
+            mask = rng.random((60, 45)) < density
+            accelerated = drop_small_components(mask)
+            with patch.dict(sys.modules, {'cv2': None}):
+                reference = drop_small_components(mask)
+            np.testing.assert_array_equal(accelerated, reference)
+
+    def test_real_persistently_unknown_digit_is_repaired_but_known_digits_are_protected(self):
+        from hbr_recog.damage import DamageReader
+        from types import SimpleNamespace
+        with Image.open(Path(__file__).parent / 'fixtures/previousbest/blocked-digit.png') as im:
+            rgb = np.array(im.convert('RGB'))
+        reader = DamageReader(min_run=1, repair_unknown=True)
+        if getattr(reader.label_store, 'ocr', None) is None:
+            self.skipTest('RapidOCR is not available')
+        self.assertEqual([(r.value, r.unresolved) for r in reader.read_band(rgb, False)], [(2793129, 0)])
+        fake = SimpleNamespace(ocr=SimpleNamespace(_recognise=lambda row: [('9,793,129', .99)]))
+        reader.label_store = fake
+        self.assertEqual([(r.text, r.unresolved) for r in reader.read_band(rgb, False)], [('279?129', 1)])
+
     def test_actual_recent_clear_and_damaged_readings_recover_both_directions(self):
         for sequence in [('today-47', 'today-47', 'today-48', 'today-48', 'today-47'),
                          ('today-48', 'today-48', 'today-47', 'today-47')]:

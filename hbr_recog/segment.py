@@ -267,6 +267,22 @@ def drop_small_components(mask: np.ndarray, min_ratio: float = 0.25) -> np.ndarr
     if not mask.any():
         return mask
 
+    # Same four-neighbour/relative-size rule as the reference implementation,
+    # executed in native code when OpenCV (used by RapidOCR) is available.
+    try:
+        import cv2
+    except ImportError:
+        pass
+    else:
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(
+            np.ascontiguousarray(mask, dtype=np.uint8), connectivity=4)
+        if count <= 2:
+            return mask
+        sizes = stats[1:, cv2.CC_STAT_AREA]
+        keep = np.zeros(count, dtype=bool)
+        keep[1:] = sizes >= sizes.max() * min_ratio
+        return keep[labels]
+
     labels = np.zeros((height, width), dtype=np.int32)
     sizes: List[int] = [0]     # 下标 0 占位
     current = 0
