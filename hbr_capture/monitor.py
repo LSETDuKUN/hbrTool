@@ -124,6 +124,10 @@ class Monitor:
         self._event_serial = 0
         self._label_retry_at = 0.0
         self._digit_reference = None  # Last readable glyph pixels, not a new OCR gate.
+        self._recovery_until = None
+        self._retry_immediately = False
+        self._sample_log = None
+        self._sample_flush_at = 0.0
 
         self.damage_hits = 0
         self.flash_skipped = 0
@@ -433,7 +437,8 @@ class Monitor:
             if self.cfg.on_damage is not None:
                 self.cfg.on_damage({"run": self.run_id, "file": f"{self.seq:06d}.png",
                     "event_id": self._event_serial, "update": update, "readings": readings})
-        self._label_retry_at = now + 0.5
+        self._label_retry_at = now + (0.1 if any(
+            r.get('unresolved') or r['label'] == '未知' for r in readings) else 0.5)
 
     def _retry_unknown_label(self, frame, key, now):
         if (not self._event_flushed or key != self._event_key
@@ -441,7 +446,8 @@ class Monitor:
                 or all(r["label"] != "未知" and not r.get("unresolved", 0)
                        for r in self._confirmed_readings)):
             return
-        self._label_retry_at = now + 0.5
+        self._label_retry_at = now + (0.1 if self._recovery_until and
+                                     now < self._recovery_until else 0.5)
         try:
             found = self._read_damage_frame(frame, recognize_labels=True)
         except Exception as exc:
@@ -489,8 +495,26 @@ class Monitor:
         except ImportError:
             return
 
+        read_started = time.perf_counter()
         found = self._read_damage_frame(frame)
         now = time.time()
+        if self._sample_log is not None:
+            try:
+                self._sample_log.write(json.dumps(dict(
+                    captured_at=frame.timestamp, numeric_ms=round((time.perf_counter() - read_started) * 1000, 2),
+                    event_before=self._event_serial, visible_before=self._damage_visible,
+                    readings=[dict(text=r.text, value=r.value, unresolved=r.unresolved, box=r.box) for r in found]
+                ), ensure_ascii=False) + '\n')
+                if now >= self._sample_flush_at:
+                    self._sample_log.flush()
+                    self._sample_flush_at = now + 1
+            except OSError as exc:
+                self._say(f"采样诊断写入失败，继续抓帧: {exc}")
+                try:
+                    self._sample_log.close()
+                except OSError:
+                    pass
+                self._sample_log = None
 
         # A flash hides the digits; it is not evidence that the display ended.
         if cfg.reject_flash and self._bright_ratio(frame) >= cfg.flash_bright_ratio:
@@ -499,6 +523,8 @@ class Monitor:
             return
 
         if not found:
+            if self._damage_visible:
+                self._schedule_recovery(now)
             if self._damage_visible and self._digits_still_visible(frame):
                 self._missing_since = None
                 self._event_last_seen = now
@@ -509,11 +535,52 @@ class Monitor:
             return
 
         key = tuple(r.value for r in found)
+        compatible = (self._damage_visible and self._event_flushed and
+                      self._compatible_readings(self._confirmed_readings, found))
+        if compatible and any(r.unresolved for r in found):
+            # 40?215 is still the same display as 404215, not a new value 40215.
+            self._missing_since = None
+            self._event_last_seen = now
+            self._current_damage_key = self._event_key
+            self._replacement_key = None
+            self._schedule_recovery(now)
+            return
+        recovery = compatible and any(r.get('unresolved') for r in self._confirmed_readings)
         digits = sum(len(str(value)) for value in key)
         self._current_damage_key = key
-        self.observe_damage(key, digits, frame, diff, now)
+        self.observe_damage(key, digits, frame, diff, now, recovery=recovery)
         self._retry_unknown_label(frame, key, now)
         self._remember_digits(frame, found)
+        if any(r.unresolved for r in found) or (self._event_flushed and any(
+                r.get('unresolved') or r['label'] == '未知' for r in self._confirmed_readings)):
+            self._schedule_recovery(now)
+        else:
+            self._recovery_until = None
+            self._retry_immediately = False
+
+    @staticmethod
+    def _compatible_readings(previous, current):
+        """Keep unknown digit positions instead of comparing integers with holes removed."""
+        if len(previous) != len(current) or not previous:
+            return False
+        for old, new in zip(previous, current):
+            a, b = old.get('text', str(old['value'])), new.text
+            if len(a) != len(b) or not all(x == y or x == '?' or y == '?' for x, y in zip(a, b)):
+                return False
+        return True
+
+    def _schedule_recovery(self, now):
+        if self._recovery_until is None:
+            self._recovery_until = now + 1.0
+            self._retry_immediately = True
+
+    def _sampling_period(self, normal, now):
+        if self._retry_immediately:
+            self._retry_immediately = False
+            return 0.0
+        if self._recovery_until is not None and now < self._recovery_until:
+            return min(normal, 1 / 30)
+        return normal
 
     def _remember_digits(self, frame, readings):
         """Remember tiny digit masks; capture and recognition regions stay unchanged."""
@@ -548,7 +615,8 @@ class Monitor:
                 return False
         return True
 
-    def observe_damage(self, key, digits: int, frame: Frame, diff: float, now: float) -> None:
+    def observe_damage(self, key, digits: int, frame: Frame, diff: float, now: float,
+                       recovery: bool = False) -> None:
         """看到一个伤害读数：推进事件状态机，必要时定稿存盘。
 
         抽出来是为了能单测 —— 这一段的判据踩过好几种坑
@@ -581,7 +649,7 @@ class Monitor:
                 elif now - self._replacement_since >= self.cfg.damage_stable_seconds:
                     # A stable prefix completion belongs to the already counted
                     # display. Reuse its ID so the ledger replaces, not adds.
-                    completion = (len(key) == len(self._event_key) and all(
+                    completion = recovery or (len(key) == len(self._event_key) and all(
                         str(v).startswith(str(old)) for v, old in zip(key, self._event_key)))
                     if completion:
                         self._event_key = key
@@ -633,6 +701,8 @@ class Monitor:
             self._flush_event(now)
         self._damage_visible = False
         self._missing_since = None
+        self._recovery_until = None
+        self._retry_immediately = False
 
     # ------------------------------------------------------------ 主循环
 
@@ -657,6 +727,11 @@ class Monitor:
         # 日志按会话分开，这样归档/删除时能整批带走
         self._log_path = cfg.outdir / f"session-{self.run_id}.log"
         self._log_handle = self._log_path.open("a", encoding="utf-8")
+        if cfg.damage_trigger:
+            try:
+                self._sample_log = (cfg.outdir / f"session-{self.run_id}-samples.jsonl").open('a', encoding='utf-8')
+            except OSError as exc:
+                self._say(f"采样诊断暂不可用: {exc}")
 
         hotkey_vk = win32.parse_hotkey(cfg.hotkey_name) if cfg.hotkey_name else None
         stop_vk = (
@@ -850,8 +925,9 @@ class Monitor:
                 prev = frame
 
                 elapsed = time.time() - loop_start
-                if period > elapsed:
-                    time.sleep(period - elapsed)
+                sampling_period = self._sampling_period(period, time.time())
+                if sampling_period > elapsed:
+                    time.sleep(sampling_period - elapsed)
 
         except KeyboardInterrupt:
             stopped_by_user = True
@@ -899,6 +975,12 @@ class Monitor:
 
     def _cleanup(self, minimized_console) -> None:
         """把控制台还回来、把日志关掉。无论正常结束还是异常都要走到。"""
+        if self._sample_log is not None:
+            try:
+                self._sample_log.close()
+            except OSError:
+                pass
+            self._sample_log = None
         if minimized_console:
             win32.restore_console(minimized_console)
         if self._log_handle is not None:

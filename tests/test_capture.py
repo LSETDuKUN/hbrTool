@@ -752,6 +752,8 @@ class TestWidgetSmoke(unittest.TestCase):
         try:
             widget._want_running = False
             widget._stop.set()
+            if widget.thread is not None:
+                widget.thread.join(timeout=5)
             widget.root.destroy()
         except Exception:
             pass

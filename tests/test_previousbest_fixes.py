@@ -11,6 +11,7 @@ from PIL import Image
 from hbr_capture.capture import Frame
 from hbr_capture.damage_stats import DamageLedger, resource_state
 from hbr_capture.monitor import Monitor, MonitorConfig
+from hbr_recog.damage import DamageRead
 
 
 def frame(number):
@@ -21,6 +22,50 @@ def frame(number):
 
 
 class CountingFixes(unittest.TestCase):
+    def test_actual_recent_clear_and_damaged_readings_recover_both_directions(self):
+        for sequence in [('today-47', 'today-47', 'today-48', 'today-48', 'today-47'),
+                         ('today-48', 'today-48', 'today-47', 'today-47')]:
+            with tempfile.TemporaryDirectory() as tmp:
+                mon, events = self.monitor(Path(tmp))
+                for i, n in enumerate(sequence):
+                    self.check(mon, frame(n), i * .35)
+                ledger = DamageLedger()
+                for event in events: ledger.add(event)
+                self.assertEqual(ledger.total, 404215)
+                self.assertEqual(len(ledger.events), 1)
+
+    def test_occluded_digit_recovers_in_original_event(self):
+        from dataclasses import replace
+        image = frame(351)
+        complete = DamageRead(404215, '404215', .9, (490, 120, 790, 176), 6,
+                              label='合计', label_score=.9)
+        partial = replace(complete, value=40215, text='40?215', unresolved=1)
+        for sequence in ((partial, partial, complete, complete),
+                         (complete, complete, partial, partial, complete, complete)):
+            with tempfile.TemporaryDirectory() as tmp:
+                mon, events = self.monitor(Path(tmp))
+                for i, reading in enumerate(sequence):
+                    with patch.object(mon, '_read_damage_frame', return_value=[reading]):
+                        self.check(mon, image, i * .35)
+                ledger = DamageLedger()
+                for event in events: ledger.add(event)
+                self.assertEqual(ledger.total, 404215)
+                self.assertEqual(len(ledger.events), 1)
+                self.assertEqual(mon.damage_hits, 1)
+
+    def test_recovery_burst_is_immediate_bounded_and_restored(self):
+        mon = Monitor(MonitorConfig(quiet=True))
+        normal = 1 / 15
+        mon._schedule_recovery(10)
+        self.assertEqual(mon._sampling_period(normal, 10), 0)
+        self.assertEqual(mon._sampling_period(normal, 10.1), 1 / 30)
+        mon._schedule_recovery(10.9)
+        self.assertEqual(mon._sampling_period(normal, 11.1), normal)
+        mon._damage_visible = True
+        mon.observe_no_damage(12)
+        mon.observe_no_damage(12.3)
+        self.assertIsNone(mon._recovery_until)
+
     def monitor(self, path):
         events = []
         mon = Monitor(MonitorConfig(outdir=path, damage_trigger=True, quiet=True,
