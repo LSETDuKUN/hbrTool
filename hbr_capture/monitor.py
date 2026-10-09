@@ -123,6 +123,7 @@ class Monitor:
         self._confirmed_readings = []
         self._event_serial = 0
         self._label_retry_at = 0.0
+        self._digit_reference = None  # Last readable glyph pixels, not a new OCR gate.
 
         self.damage_hits = 0
         self.flash_skipped = 0
@@ -333,9 +334,10 @@ class Monitor:
                 "bytes": size,
                 "broken": not frame.ok,
             }
-            if trigger == "damage":
+            if trigger in ("damage", "damage_update"):
                 record["damage"] = self._confirmed_readings
                 record["damage_event_id"] = self._event_serial
+                record["update"] = trigger == "damage_update"
             with (self.cfg.outdir / "index.jsonl").open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -395,8 +397,8 @@ class Monitor:
         self._missing_since = None
         self._replacement_key = None
 
-    def _flush_event(self, now: float) -> None:
-        """把缓冲的这一次伤害事件存下来（只存一帧）。"""
+    def _flush_event(self, now: float, update: bool = False) -> None:
+        """首次保存或修正同一事件；修正留图，但不增加伤害笔数。"""
         frame = self._event_frame
         key = self._event_key
         if frame is None or key is None:
@@ -421,14 +423,16 @@ class Monitor:
         self._last_damage_key = key
         self._last_damage_seen = now
         self._saved_damage_key = key
-        self.damage_hits += 1
+        if not update:
+            self.damage_hits += 1
 
         text = ", ".join(f"{value:,}" for value in key)
-        self._say(f"      >> 伤害 {text}")
-        if self._save(frame, "damage", self._event_diff, dedup=False) is not False:
+        self._say(f"      >> {'修正原伤害' if update else '伤害'} {text}")
+        trigger = "damage_update" if update else "damage"
+        if self._save(frame, trigger, self._event_diff, dedup=False) is not False:
             if self.cfg.on_damage is not None:
                 self.cfg.on_damage({"run": self.run_id, "file": f"{self.seq:06d}.png",
-                    "event_id": self._event_serial, "readings": readings})
+                    "event_id": self._event_serial, "update": update, "readings": readings})
         self._label_retry_at = now + 0.5
 
     def _retry_unknown_label(self, frame, key, now):
@@ -488,23 +492,61 @@ class Monitor:
         found = self._read_damage_frame(frame)
         now = time.time()
 
+        # A flash hides the digits; it is not evidence that the display ended.
+        if cfg.reject_flash and self._bright_ratio(frame) >= cfg.flash_bright_ratio:
+            self.flash_skipped += 1
+            self._missing_since = None
+            return
+
         if not found:
+            if self._damage_visible and self._digits_still_visible(frame):
+                self._missing_since = None
+                self._event_last_seen = now
+                self._current_damage_key = self._event_key
+                return
             self._current_damage_key = None
             self.observe_no_damage(now)
             return
-
-        # 闪白帧上的数字通常是特效残留，存下来没意义
-        if cfg.reject_flash:
-            ratio = self._bright_ratio(frame)
-            if ratio >= cfg.flash_bright_ratio:
-                self.flash_skipped += 1
-                return
 
         key = tuple(r.value for r in found)
         digits = sum(len(str(value)) for value in key)
         self._current_damage_key = key
         self.observe_damage(key, digits, frame, diff, now)
         self._retry_unknown_label(frame, key, now)
+        self._remember_digits(frame, found)
+
+    def _remember_digits(self, frame, readings):
+        """Remember tiny digit masks; capture and recognition regions stay unchanged."""
+        import numpy as np
+        reader = self._ensure_reader().for_frame(frame.width, frame.height)
+        y0, x0 = reader.y_band[0], reader.x_band[0]
+        pixels = np.frombuffer(frame.bgra, np.uint8).reshape(frame.height, frame.width, 4)
+        masks = []
+        for reading in readings:
+            if reading.unresolved:
+                continue
+            x, y, xx, yy = reading.box
+            box = (max(0, x + x0 - 3), max(0, y + y0 - 3),
+                   min(frame.width, xx + x0 + 3), min(frame.height, yy + y0 + 3))
+            a, b, c, d = box
+            mask = np.all(pixels[b:d, a:c, :3] >= 235, axis=2)
+            if mask.sum() >= 20:
+                masks.append((box, mask))
+        if masks:
+            self._digit_reference = (frame.size, masks)
+
+    def _digits_still_visible(self, frame):
+        """OCR may fail while the same white glyph pixels remain on screen."""
+        import numpy as np
+        if self._digit_reference is None or self._digit_reference[0] != frame.size:
+            return False
+        pixels = np.frombuffer(frame.bgra, np.uint8).reshape(frame.height, frame.width, 4)
+        for (a, b, c, d), reference in self._digit_reference[1]:
+            current = np.all(pixels[b:d, a:c, :3] >= 235, axis=2)
+            union = np.count_nonzero(reference | current)
+            if not union or np.count_nonzero(reference & current) / union < .8:
+                return False
+        return True
 
     def observe_damage(self, key, digits: int, frame: Frame, diff: float, now: float) -> None:
         """看到一个伤害读数：推进事件状态机，必要时定稿存盘。
@@ -513,6 +555,7 @@ class Monitor:
         （滚动、切分残缺、特效一闪造成的假消失），值得有回归测试兜着。
 
         消失后重现或定稿后出现不同的稳定数字，都可以开启新事件。
+        前缀补全是例外：更新原事件，避免先前几位再完整数字分别入账。
         同一数字持续挂着、短暂漏识别及残缺切分不应重复入账。
         """
         if (self._missing_since is not None
@@ -536,7 +579,19 @@ class Monitor:
                     self._replacement_key = key
                     self._replacement_since = now
                 elif now - self._replacement_since >= self.cfg.damage_stable_seconds:
-                    self._begin_event(key, digits, frame, diff, self._replacement_since)
+                    # A stable prefix completion belongs to the already counted
+                    # display. Reuse its ID so the ledger replaces, not adds.
+                    completion = (len(key) == len(self._event_key) and all(
+                        str(v).startswith(str(old)) for v, old in zip(key, self._event_key)))
+                    if completion:
+                        self._event_key = key
+                        self._event_digits = digits
+                        self._event_frame = frame
+                        self._event_diff = diff
+                        self._replacement_key = None
+                        self._flush_event(now, update=True)
+                    else:
+                        self._begin_event(key, digits, frame, diff, self._replacement_since)
 
         if not self._damage_visible:
             # 数字刚出现 —— 新的一次命中

@@ -50,6 +50,26 @@ def fmt(value: float) -> str:
     return f"{value:,.0f}"
 
 
+def superseded_damage_files(frames_dir: Path, paths) -> set:
+    """Only explicit event revisions supersede older evidence, never equal values."""
+    from hbr_capture.session import read_index
+    available = {p.name for p in paths}
+    groups, superseded = {}, set()
+    for record in read_index(frames_dir):
+        name, identity = record.get('file'), record.get('damage_event_id')
+        run = record.get('run')
+        if (not isinstance(name, str) or name not in available
+                or not isinstance(identity, (int, str)) or not isinstance(run, str)
+                or record.get('trigger') not in ('damage', 'damage_update')):
+            continue
+        key = (run, identity)
+        previous = groups.setdefault(key, [])
+        if record.get('trigger') == 'damage_update':
+            superseded.update(p for p in previous if p != name)
+        previous.append(name)
+    return superseded
+
+
 def main(argv=None) -> int:
     root = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description="批量读取帧里的伤害数字")
@@ -80,6 +100,7 @@ def main(argv=None) -> int:
         min_run=1,
     )
     times = load_timestamps(frames_dir)
+    superseded = superseded_damage_files(frames_dir, paths)
 
     turn_list = None
     if args.turns:
@@ -97,10 +118,12 @@ def main(argv=None) -> int:
 
     readings = []
     for i, path in enumerate(paths):
-        found = reader.read_file(path)
+        # Keep the original frame/turn slots; replaced evidence adds no hit.
+        found = [] if path.name in superseded else reader.read_file(path)
         readings.append(
             {
                 "file": path.name,
+                "superseded": path.name in superseded,
                 "time": times.get(path.name, ""),
                 "turn": turn_list[i] if turn_list else None,
                 "hits": [
