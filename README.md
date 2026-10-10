@@ -1,4 +1,6 @@
-> **2026-10-10：内存版已独立为 [HBR Live](hbr_live/README.md)。新入口为 `hbr_live/启动HBR Live.bat`；本目录原有 OCR 工具保留为历史项目。**
+> **项目状态（2026-10-10）**：本仓库保留旧 OCR 工具与早期实验代码，历史分支已归并到 `main`。后续内存版开发转至独立仓库 **[hbrLiveTool · HBR Live](https://github.com/LSETDuKUN/hbrLiveTool)**，当前功能、进度、安装和迁移说明请查看新仓库 README。
+>
+> 旧项目最终内容沿用 `previousbest` 后续修复及内存探索分支；旧 `main` 的实验提交保留在合并历史中，没有重新套用其代码。本机如仍有 `hbr_live/`，它是独立 Git 仓库，已从本仓库停止跟踪，可整体移走。以下为旧工具的历史使用说明。
 
 # HBR 战斗助手
 

@@ -8,3 +8,6 @@ frames_frozen_backup/
 *.log
 *.broken-backup
 data/quest/
+
+# Standalone project with its own repository; kept locally until moved.
+/hbr_live/

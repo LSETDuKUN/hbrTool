@@ -1,2 +1,0 @@
-# Only the reference library portraits require Pillow.
-Pillow>=10
