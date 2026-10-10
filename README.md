@@ -1,3 +1,5 @@
+> **2026-10-10：内存版已独立为 [HBR Live](hbr_live/README.md)。新入口为 `hbr_live/启动HBR Live.bat`；本目录原有 OCR 工具保留为历史项目。**
+
 # HBR 战斗助手
 
 给 Heaven Burns Red（炽焰天穹）国服 PC 端做战斗数值工具：**实时抓帧 → 读出伤害 → 算数值**。

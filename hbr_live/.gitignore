@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+data/
+sessions/
+settings.json
+settings.json.tmp
+tests/_preview*.png
+*.log
