@@ -76,6 +76,7 @@ def bgra_to_ppm(frame: Frame, target_width: int) -> tuple:
 
 @dataclass
 class WidgetConfig:
+    source: str = "ocr"
     match: Optional[str] = None
     hwnd: Optional[int] = None
     outdir: Path = Path("frames")
@@ -177,6 +178,7 @@ class Widget:
         self._restarts = 0
         self._prompted_run = None
         self._monitor_started_at = 0.0
+        self._memory_resources = None
         self.damage_readings = []
         self.reading_sum = 0
         self.total_damage = 0
@@ -226,6 +228,9 @@ class Widget:
         menu_button.configure(menu=menu)
         menu.add_command(label="战斗设置 · DP / HP / 怪数", command=self._open_battle_settings)
         menu.add_command(label="星屑资料室 · 角色 / 风格 / 技能", command=self._open_library)
+        self._source_var = tk.StringVar(value=cfg.source)
+        for source, title in (("memory", "内存读取 · 实验版"), ("ocr", "画面识别 · OCR")):
+            menu.add_radiobutton(label=title, variable=self._source_var, value=source, command=self._change_source)
         menu.add_separator()
         menu.add_command(label="抓取当前帧  F9", command=self.snap)
         menu.add_command(label="窗口归位", command=self.reposition)
@@ -348,6 +353,15 @@ class Widget:
         self.root.after(2000, self._watchdog)
         self._place_beside(None)
         self.root.after(250, self.start)
+
+    def _change_source(self):
+        if self._want_running or (self.thread and self.thread.is_alive()):
+            self._source_var.set(self.cfg.source)
+            messagebox.showinfo("切换数据源", "请先停止，再切换数据源。", parent=self.root)
+            return
+        self.cfg.source = self._source_var.get()
+        self._memory_resources = None
+        self.lbl_target.config(text="已切换数据源，点击开始", fg=DIM)
 
     def _open_library(self):
         from hbr_data.window import LibraryWindow
@@ -476,6 +490,17 @@ class Widget:
         self._save_totals({"type": "battle_settings"})
 
     def _render_resources(self):
+        live = getattr(self, "_memory_resources", None)
+        if getattr(self.cfg, "source", "ocr") == "memory":
+            if live:
+                self.dp_meter.set_values(live["dp"], max(live["dp_max"], live["dp"]), live.get("dp_loss", 0))
+                self.hp_meter.set_values(live["hp"], max(live["hp_max"], live["hp"]), live.get("hp_loss", 0))
+                self.lbl_pool_hint.config(text="实时读取 · 量表上限为连接时数值")
+            else:
+                self.dp_meter.set_values(0, 0, 0)
+                self.hp_meter.set_values(0, 0, 0)
+                self.lbl_pool_hint.config(text="等待内存数据")
+            return
         state = resource_state(self.cfg.dp_max, self.cfg.hp_max,
                                self.ledger.total, self.ledger.last_damage)
         self.dp_meter.set_values(state.dp, state.dp_max, state.last_dp_loss)
@@ -519,6 +544,8 @@ class Widget:
             else:
                 line = f"{number:02d}  合计  {amount:,}\n"
                 tag = "confirmed"
+            if reading.get("source") == "memory":
+                line += f"  {reading.get('actor', '')} · {reading.get('skill', '')}\n"
             self.txt_damage.insert("end", line, tag)
         self.txt_damage.see("end")
         self.txt_damage.config(state="disabled")
@@ -565,6 +592,13 @@ class Widget:
                 item = self.queue.get_nowait()
                 if item[0] == "log":
                     self._log(item[1])
+                elif item[0] == "memory_status":
+                    self.lbl_target.config(text=item[1], fg=ACCENT)
+                    self._log(item[1])
+                elif item[0] == "memory_resources":
+                    old = self._memory_resources or item[1]
+                    self._memory_resources = dict(item[1], dp_loss=max(0, old["dp"]-item[1]["dp"]), hp_loss=max(0, old["hp"]-item[1]["hp"]))
+                    self._render_resources()
                 elif item[0] == "damage":
                     self._display_damage(item[1])
                 elif item[0] == "stopped":
@@ -650,6 +684,7 @@ class Widget:
         except ValueError as exc:
             self.lbl_enemy_hint.config(text=str(exc), fg=ERR)
             return
+        self._memory_resources = None
         self.damage_readings.clear()
         self.ledger = DamageLedger(enemies=self.ledger.enemies)
         self.reading_sum = self.total_damage = 0
@@ -702,6 +737,14 @@ class Widget:
 
         self._log(f"连接: {proc}  {info.title!r}")
         self._log(f"      客户区 {w}x{h} @ {info.client_origin}")
+
+        if getattr(self.cfg, "source", "ocr") == "memory":
+            from .memory_source import run
+            self.monitor = None
+            self.thread = threading.Thread(target=run, args=(info.pid, self._stop, self.queue.put, self.cfg.outdir), daemon=True)
+            self.thread.start()
+            self.btn_toggle.config(text="停止", bg="#665879", fg=FG)
+            return
 
         monitor_cfg = MonitorConfig(
             match=self.cfg.match,
@@ -771,7 +814,8 @@ class Widget:
             return
 
         self.btn_toggle.config(text="开始", bg=ACCENT, fg=BG)
-        self.lbl_target.config(text="已停止 · 可自由拖动", fg=DIM)
+        if self.cfg.source != "memory":
+            self.lbl_target.config(text="已停止 · 可自由拖动", fg=DIM)
         self._log("已停止。")
         self._maybe_ask_keep()
 
