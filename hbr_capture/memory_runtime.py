@@ -97,4 +97,3 @@ def scan(pattern,seconds=35,cap=5000):
   if not size:break
   address=base+size
  return hits,{'limited':False,'bytes':total,'failed':failed,'seconds':round(time.monotonic()-started,2)}
-
