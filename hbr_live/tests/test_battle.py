@@ -16,6 +16,46 @@ def state(dp=2100000, hp=5000000, address=4):
 
 
 class BattleTests(unittest.TestCase):
+    def test_non_damage_requires_execution_and_counts_once(self):
+        ledger = ActionLedger()
+        action = entry([])
+        self.assertEqual(ledger.update([action], {4}), [])
+        self.assertEqual(ledger.update([], {4}), [])
+        action['executing'] = True
+        event = ledger.update([action], {4})[0]
+        self.assertEqual(event['value'], 0)
+        self.assertEqual(ledger.update([action], {4}), [])
+        final = ledger.update([], {4})[0]
+        self.assertEqual(event['event_id'], final['event_id'])
+        self.assertTrue(final['settled'])
+
+    def test_friendly_effect_records_action_not_damage(self):
+        ledger = ActionLedger()
+        action = entry([2666], 1)
+        action['hits'][0].update(type=2, target=3, target_name='Carol', index=0)
+        event = ledger.update([action], {4})[0]
+        self.assertEqual(event['value'], 0)
+        self.assertEqual(event['targets'], [dict(address=3, name='Carol')])
+        self.assertEqual(event['hits'], [])
+
+    def test_synthetic_self_entry_and_enemy_actor_do_not_record(self):
+        action = entry([0], 1)
+        action['hits'][0].update(type=2, target=3, index=99)
+        self.assertEqual(ActionLedger().update([action], {4}), [])
+        action = entry([100], 1)
+        action['actor_is_player'] = False
+        self.assertEqual(ActionLedger().update([action], {4}), [])
+
+    def test_enemy_states_are_independent_and_keep_departed_number(self):
+        model = BattleModel()
+        model.update(dict(enemies=[state(100, 500, 4), state(200, 600, 5)], events=[]))
+        model.update(dict(enemies=[state(50, 600, 5), state(300, 700, 6)], events=[]))
+        self.assertEqual(list(model.enemies), [4, 5, 6])
+        self.assertFalse(model.enemies[4]['active'])
+        self.assertEqual(model.enemies[4]['dp'], 100)
+        self.assertEqual(model.enemies[5]['dp_change'], -150)
+        self.assertEqual(model.enemies[6]['hp'], 700)
+
     def test_recorded_break_and_kill_replay(self):
         import json
         from pathlib import Path

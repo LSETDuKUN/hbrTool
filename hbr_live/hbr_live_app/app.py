@@ -8,8 +8,9 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import ttk, filedialog, messagebox
 
-from .components import RoundedCard, RoundedButton, ResourceMeter
+from .components import RoundedCard, RoundedButton
 from .model import BattleModel
+from .enemy_cards import EnemyCard
 
 ROOT = Path(__file__).resolve().parent.parent
 BG, CARD, FG, DIM = '#201d32', '#302b46', '#f7f0ff', '#bdb1d4'
@@ -128,26 +129,25 @@ class App:
         self.body.pack(fill='both', expand=True, padx=18)
         self.resources = tk.Frame(self.body, bg=BG)
         self.label(self.resources, '敌方状态', CYAN, 13).pack(anchor='w', padx=8, pady=(2, 10))
-        self.enemy_var = tk.StringVar()
-        self.enemy_box = ttk.Combobox(self.resources, textvariable=self.enemy_var,
-                                    state='readonly', style='Live.TCombobox', font=FONT)
-        self.enemy_box.pack(fill='x', padx=6, pady=(0, 8))
-        self.enemy_box.bind('<<ComboboxSelected>>', lambda _: self.render_enemy())
-        self.dp = ResourceMeter(self.resources, 'DP', '防护', ('#6178ef', CYAN))
-        self.dp.pack(fill='x', pady=4)
-        self.hp = ResourceMeter(self.resources, 'HP', '生命', ('#f190ae', GOLD))
-        self.hp.pack(fill='x', pady=4)
-        self.resource_note = self.label(self.resources, '等待敌方状态', DIM, 9, anchor='w', justify='left', wraplength=280)
-        self.resource_note.pack(fill='x', padx=8, pady=8)
-        self.label(self.resources, '数值直接读取游戏\n显示伤害包含溢出，不用于推算扣血。', DIM, 9, wraplength=270,
-                   anchor='w', justify='left').pack(fill='x', padx=8, pady=8)
+        self.enemy_cards = {}
+        self.enemy_view = tk.Canvas(self.resources, bg=BG, highlightthickness=0, height=350)
+        enemy_scroll = ttk.Scrollbar(self.resources, command=self.enemy_view.yview)
+        self.enemy_view.configure(yscrollcommand=enemy_scroll.set)
+        enemy_scroll.pack(side='right', fill='y')
+        self.enemy_view.pack(fill='both', expand=True)
+        self.enemy_stack = tk.Frame(self.enemy_view, bg=BG)
+        enemy_slot = self.enemy_view.create_window(0, 0, anchor='nw', window=self.enemy_stack)
+        self.enemy_view.bind('<Configure>', lambda e: self.enemy_view.itemconfigure(enemy_slot, width=e.width))
+        self.enemy_stack.bind('<Configure>', lambda e: self.enemy_view.configure(scrollregion=self.enemy_view.bbox('all')))
+        self.resource_note = self.label(self.resources, '各条独立读取 · 比例参考本场观测最大值', DIM, 9, anchor='w', wraplength=275)
+        self.resource_note.pack(fill='x', padx=8, pady=5, before=self.enemy_view)
         self.history = tk.Frame(self.body, bg=BG)
         self.label(self.history, '行动记录', PINK, 13).pack(anchor='w', pady=(2, 10))
         tree_wrap = tk.Frame(self.history, bg=CARD)
         tree_wrap.pack(fill='both', expand=True)
-        self.tree = ttk.Treeview(tree_wrap, columns=('actor', 'skill', 'damage'), show='headings',
+        self.tree = ttk.Treeview(tree_wrap, columns=('actor', 'skill', 'target', 'damage'), show='headings',
                                  selectmode='browse', style='Live.Treeview', height=4)
-        for key, title, width in [('actor', '行动者', 100), ('skill', '技能', 155), ('damage', '显示伤害', 125)]:
+        for key, title, width in [('actor', '行动者', 100), ('skill', '技能', 135), ('target', '目标', 95), ('damage', '显示伤害', 125)]:
             self.tree.heading(key, text=title)
             self.tree.column(key, width=width, minwidth=65, anchor='e' if key == 'damage' else 'w')
         scrollbar = ttk.Scrollbar(tree_wrap, command=self.tree.yview)
@@ -180,6 +180,7 @@ class App:
         self.resources.grid_forget()
         self.history.grid_forget()
         if self.compact.get():
+            self.tree.configure(displaycolumns=('actor', 'skill', 'damage'))
             for key, width in (('actor', 75), ('skill', 120), ('damage', 135)):
                 self.tree.column(key, width=width, stretch=key != 'damage')
             self.root.minsize(390, 820)
@@ -194,9 +195,10 @@ class App:
             self.detail_wrap.pack_forget()
             self.detail_caption.pack_forget()
             self.resource_note.pack_forget()
-            self.dp.configure(height=106)
+            self.enemy_view.configure(height=min(220, max(110, len(self.enemy_cards)*110)))
             self.root.geometry(f'420x{min(850, self.root.winfo_screenheight()-90)}')
         else:
+            self.tree.configure(displaycolumns=('actor', 'skill', 'target', 'damage'))
             for key, width in (('actor', 100), ('skill', 155), ('damage', 145)):
                 self.tree.column(key, width=width, stretch=key != 'damage')
             self.root.minsize(780, 730)
@@ -258,6 +260,9 @@ class App:
                     self.session_path = data['path']
                     self.tree.delete(*self.tree.get_children())
                     self.enemy_keys = []
+                    for card in self.enemy_cards.values():
+                        card.destroy()
+                    self.enemy_cards.clear()
                     self.last_sample = None
                     self.connected = True
                     self.start_button.configure(text='停止')
@@ -286,16 +291,13 @@ class App:
         self.total_label.configure(text=f'{self.model.total:,}')
         biggest = max((e['value'] for e in self.model.actions.values()), default=0)
         self.summary.configure(text=f'{len(self.model.actions)} 次行动  ·  单次最高 {biggest:,}')
-        keys = list(self.model.enemies)
-        if keys != self.enemy_keys:
-            self.enemy_keys = keys
-            self.enemy_box.configure(values=[f'{n+1} · {self.model.enemies[key]["name"]}' for n, key in enumerate(keys)])
-            if keys:
-                self.enemy_box.current(0)
+        self.enemy_keys = list(self.model.enemies)
         self.render_enemy()
         for event in events:
             iid = str(event['event_id'])
-            values = (event['actor'], event['skill'], f'{event["value"]:,}' + (' …' if not event['settled'] else ''))
+            targets = self.target_summary(event)
+            amount = f'{event["value"]:,}' if event['value'] else ('未见伤害' if event['settled'] else '已发动')
+            values = (event['actor'], event['skill'], targets, amount + (' …' if not event['settled'] else ''))
             if self.tree.exists(iid):
                 self.tree.item(iid, values=values)
             else:
@@ -306,13 +308,22 @@ class App:
         self.render_details()
 
     def render_enemy(self):
-        index = self.enemy_box.current()
-        if not 0 <= index < len(self.enemy_keys):
-            return
-        state = self.model.enemies[self.enemy_keys[index]]
-        self.dp.set_values(state['dp'], state['dp_reference'], -state['dp_change'])
-        self.hp.set_values(state['hp'], state['hp_reference'], -state['hp_change'])
-        self.resource_note.configure(text=f'DP 回升 {state["dp_rises"]} 次 · HP 回升 {state["hp_rises"]} 次\n量表参考值：本次连接以来观测到的最大值。')
+        for number, (key, state) in enumerate(self.model.enemies.items(), 1):
+            if key not in self.enemy_cards:
+                card = self.enemy_cards[key] = EnemyCard(self.enemy_stack, number)
+                card.pack(fill='x', pady=(0, 6))
+            self.enemy_cards[key].update_state(state)
+        if self.compact.get():
+            self.enemy_view.configure(height=min(220, max(110, len(self.enemy_cards)*110)))
+
+    def target_label(self, address, fallback='目标未确认'):
+        if address in self.enemy_keys:
+            return f'敌{self.enemy_keys.index(address)+1}'
+        return fallback
+
+    def target_summary(self, event):
+        targets = event.get('targets') or [dict(address=h['target']) for h in event['hits']]
+        return '、'.join(dict.fromkeys(self.target_label(t['address'], t.get('name', '目标未确认')) for t in targets)) or '待确认'
 
     def detail_text(self):
         selected = self.tree.selection()
@@ -322,6 +333,14 @@ class App:
         if event is None:
             return ''
         text = f'{event["actor"]} · {event["skill"]}\n显示伤害 {event["value"]:,}  ·  {"已结算" if event["settled"] else "命中进行中"}\n\n'
+        totals = {}
+        for hit in event['hits']:
+            totals[hit['target']] = totals.get(hit['target'], 0) + hit['damage']
+        if totals:
+            text += '目标伤害：' + ' / '.join(f'{self.target_label(k)} {v:,}' for k,v in totals.items()) + '\n\n'
+        else:
+            text += '未观测到对敌伤害；已记录技能发动，暂不解析特殊效果。\n'
+        text += '作用目标：' + self.target_summary(event) + '\n\n'
         for n, hit in enumerate(event['hits'], 1):
             enemy = self.model.enemies.get(hit['target'], {})
             target_index = self.enemy_keys.index(hit['target'])+1 if hit['target'] in self.enemy_keys else '?'

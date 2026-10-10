@@ -88,12 +88,14 @@ def snapshot(r, module):
                 content = r.q(hit + 32)
                 if r.cls(content) != 'HitContent':
                     raise RuntimeError('命中内容已失效')
-                hits.append(dict(address=hit, target=r.q(hit + 24), type=r.i(hit + 16),
+                target = r.q(hit + 24)
+                target_name = r.string(r.q(r.q(r.q(target + 488) + 16) + 24)) if r.cls(target) == 'BattlePlayerData' else r.string(r.q(target + 496)) if r.cls(target) == 'BattleEnemyData' else None
+                hits.append(dict(address=hit, target=target, target_name=target_name, type=r.i(hit + 16),
                     finished=r.read(hit + 41, 1) == b'\1', damage=r.i(content + 36) or 0,
                     raw_damage=r.i(content + 32), result_type=r.i(content + 28),
                     index=r.i(hit + 20), funnel=r.read(content + 174, 1) == b'\1',
                     critical=r.read(content + 171, 1) == b'\1'))
-        actions.append(dict(address=entry, actor=actor, actor_name=r.string(r.q(card + 24)) or r.cls(actor),
+        actions.append(dict(address=entry, actor=actor, actor_is_player=r.cls(actor) == 'BattlePlayerData', executing=entry == preserved, actor_name=r.string(r.q(card + 24)) or r.cls(actor),
             skill=r.string(r.q(master + 24)), skill_name=r.string(r.q(master + 32)) or '未知技能',
             hit_set=hit_set, hits=hits))
     return states, actions
@@ -131,10 +133,12 @@ def run(stop, paused, emit, outdir):
                 states, actions = snapshot(r, module)
                 if not states:
                     break
-                if any(s['address'] not in known_enemies for s in states):
-                    raise RuntimeError('敌人列表已更换，请重新连接新战斗。')
+                known_enemies.update(s['address'] for s in states)
                 for action in actions:
                     action['actor_name'] = names.actor(action['actor_name'])
+                    for hit in action['hits']:
+                        if hit.get('target_name'):
+                            hit['target_name'] = names.actor(hit['target_name'])
                 events = ledger.update(actions, known_enemies)
                 if states != previous or events:
                     packet = dict(time=time.time(), enemies=states, events=events)

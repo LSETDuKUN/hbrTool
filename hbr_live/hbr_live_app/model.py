@@ -9,10 +9,13 @@ class BattleModel:
         self.run_id = None
 
     def update(self, packet):
+        present = {s['address'] for s in packet['enemies']}
+        for key, old in self.enemies.items():
+            old['active'] = key in present
         for state in packet['enemies']:
             key = state['address']
             old = self.enemies.get(key)
-            data = dict(state)
+            data = dict(state, active=True)
             for pool in ('dp', 'hp'):
                 value = state[pool]
                 data[pool + '_reference'] = max(value, old[pool + '_reference'] if old else value)

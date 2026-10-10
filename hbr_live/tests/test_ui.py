@@ -30,7 +30,7 @@ class DashboardTests(unittest.TestCase):
         self.app.model.update(dict(enemies=[enemy], events=[event]))
         self.app.render([event])
         self.assertEqual(len(self.app.tree.get_children()), 1)
-        self.assertEqual(self.app.dp.current, 300)
+        self.assertEqual(self.app.enemy_cards[4].state['dp'], 300)
         self.assertEqual(self.app.total_label.cget('text'), '75')
         self.assertIn('凌空铁锤', self.app.detail_text())
 
@@ -40,6 +40,18 @@ class DashboardTests(unittest.TestCase):
             self.app.layout()
             self.root.update_idletasks()
         self.assertFalse(any(k.startswith(('hbr_capture', 'hbr_recog')) for k in sys.modules))
+
+    def test_three_enemy_cards_and_target_damage_detail(self):
+        enemies = [dict(address=n, dp=n*100, hp=n*1000, name='测试敌人') for n in (4, 5, 6)]
+        event = dict(event_id=1, actor='Saki', skill='群体技能', value=300, settled=True,
+                     hits=[dict(target=n, damage=amount, funnel=False, critical=False)
+                           for n, amount in [(4, 100), (6, 200)]])
+        self.app.model.update(dict(enemies=enemies, events=[event]))
+        self.app.render([event])
+        self.assertEqual(len(self.app.enemy_cards), 3)
+        self.assertEqual(self.app.enemy_cards[5].state['hp'], 5000)
+        self.assertEqual(self.app.target_summary(event), '敌1、敌3')
+        self.assertIn('敌1 100 / 敌3 200', self.app.detail_text())
 
     def test_pause_does_not_clear_model(self):
         self.app.connected = True
